@@ -5,6 +5,7 @@ import os
 import math
 from datetime import datetime
 import asyncio
+import tempfile
 
 # --- GROUP CONFIGURATION ---
 ROJOS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
@@ -49,7 +50,7 @@ class LinupApp:
         self.page.scroll     = None
         self.page.on_resized = self._on_resize
 
-        # macOS window settings
+        # window settings
         self.page.window.width      = 420
         self.page.window.height     = 860
         self.page.window.min_width  = 380
@@ -101,7 +102,7 @@ class LinupApp:
         candidates += [
             os.path.join(os.path.expanduser("~"), "linup_data"),
             os.path.join(os.getcwd(), "linup_data"),
-            os.path.join("/tmp", "linup_data"),
+            os.path.join(tempfile.gettempdir(), "linup_data"),
         ]
         self.db_path = None
         for data_dir in candidates:
@@ -1472,7 +1473,7 @@ class LinupApp:
             self.actualizar_sugerencias()
         except Exception as _err:
             import traceback
-            with open("/tmp/linup_error.log", "a") as _f:
+            with open(os.path.join(tempfile.gettempdir(), "linup_error.log"), "a") as _f:
                 _f.write(f"[process_number] {type(_err).__name__}: {_err}\n")
                 traceback.print_exc(file=_f)
 
