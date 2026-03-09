@@ -14,7 +14,7 @@ GRUPOS_MAESTROS = {
     '36': {3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36},
     '1a': set(range(1, 13)), '2a': set(range(13, 25)), '3a': set(range(25, 37)),
     'Z0': {0, 3, 12, 15, 26, 32, 35},
-    'ZG': {0, 2, 3, 4, 7, 12, 15, 18, 21, 19, 22, 25, 26, 28, 29, 31, 32, 35},
+    'ZG': {0, 2, 3, 4, 7, 12, 15, 18, 21, 19, 22, 25, 26, 28, 29, 32, 35},
     'ZP': {5, 8, 10, 11, 13, 16, 23, 24, 27, 30, 33, 36},
     'H':  {1, 6, 9, 14, 17, 20, 31, 34},
     'T1': {0, 2, 4, 6, 13, 15, 17, 19, 21, 25, 27, 32, 34},
@@ -42,7 +42,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v11.2"
+        self.page.title      = "Linup v11.4"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -217,6 +217,7 @@ class LinupApp:
         self.idx_fibo_in          = 0
         self.nivel_martingala_in  = 0
         self.last_bet_outside     = None
+        self.last_bank_delta      = 0.0
         self.stop_loss_triggered  = False
         self.activa               = False
         self.grupos_activos       = []
@@ -260,7 +261,7 @@ class LinupApp:
                         ft.Text("Linup", color='#3498db', size=64,
                                 weight=ft.FontWeight.BOLD),
                         ft.Container(height=8),
-                        ft.Text("v11.2", color='#7f8c8d', size=18),
+                        ft.Text("v11.4", color='#7f8c8d', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -1128,16 +1129,16 @@ class LinupApp:
 
         self.lbl_bank = ft.Text(
             f"BANK: ${self.banca_actual:.2f}",
-            color='#2ecc71', weight=ft.FontWeight.BOLD, size=10, expand=True,
+            color='#2ecc71', weight=ft.FontWeight.BOLD, size=14, expand=True,
         )
         self.lbl_inv = ft.Text(
             "BET: $0.00",
-            color='#f1c40f', weight=ft.FontWeight.BOLD, size=10, expand=True,
+            color='#f1c40f', weight=ft.FontWeight.BOLD, size=14, expand=True,
             text_align=ft.TextAlign.CENTER,
         )
         self.lbl_pl = ft.Text(
             "P/L: 0.0%",
-            color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, size=10, expand=True,
+            color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, size=14, expand=True,
             text_align=ft.TextAlign.RIGHT,
         )
         stats_bar = ft.Container(
@@ -1434,6 +1435,7 @@ class LinupApp:
 
                 if any(num in GRUPOS_MAESTROS[g] for g in self.grupos_activos):
                     self.banca_actual += win_py
+                    self.last_bank_delta = win_py - total_cost
                     if is_out:
                         self.idx_fibo_out         = 0
                         self.nivel_martingala_out = 0
@@ -1441,6 +1443,7 @@ class LinupApp:
                         self.idx_fibo_in         = 0
                         self.nivel_martingala_in = 0
                 else:
+                    self.last_bank_delta = -total_cost
                     if n == 1:
                         if is_out:
                             if self.idx_fibo_out < len(PROG_FIBO) - 1:
@@ -1457,9 +1460,10 @@ class LinupApp:
                 self.grupos_activos = []
                 self.limpiar_seleccion_visual()
             else:
-                self.banca_actual -= self.val_fin
-                if num in ROJOS:
-                    self.banca_actual += (self.val_fin * 2)
+                delta = self.val_fin * (1 if num in ROJOS else -1)
+                self.banca_actual      += delta
+                self.last_bank_delta    = delta
+                self.last_bet_outside   = None
 
             self.history_nums.append(num)
             self.sliding_window.append(num)
@@ -1504,6 +1508,148 @@ class LinupApp:
         self._refresh_mixer_colors()
         self.update_inv_label()
         self.lbl_inv.update()
+
+    def _show_roulette_chip_popup(self, on_ready_cb):
+        """Show vertical roulette chip placement popup for all active straight groups.
+        Calls on_ready_cb() when the user dismisses with READY."""
+        grp_count    = len(self.grupos_activos)
+        multi        = PROG_FIBO[self.idx_fibo_in] if grp_count == 1 else 3 ** self.nivel_martingala_in
+        chip_per_num = self.val_fin * multi
+        total_cost, _ = self._compute_bet()   # exact amount that will hit the bank
+
+        # Merge all nums from active straight groups
+        straight_groups = [g for g in self.grupos_activos if g in self.GRUPOS_STRAIGHT]
+        all_nums: set = set()
+        for g in straight_groups:
+            all_nums |= GRUPOS_MAESTROS[g]
+
+        # Color: use first group's color, or blended label if two
+        def grp_color(g):
+            return C_SEC if g in {'Z0', 'ZG', 'ZP', 'H'} else C_SET
+        title_chips = [
+            ft.Container(
+                bgcolor=grp_color(g), border_radius=5,
+                padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                content=ft.Text(g, color=ft.Colors.WHITE, size=14,
+                                weight=ft.FontWeight.BOLD),
+            )
+            for g in straight_groups
+        ]
+
+        CELL = 25   # zero cell size
+        CN   = 50   # number cell size (double, -10%)
+        GAP  = 2
+
+        def num_bg(num):
+            return '#27ae60' if num == 0 else ('#c0392b' if num in ROJOS else '#2c3e50')
+
+        def make_cell(num):
+            lit = num in all_nums
+            return ft.Container(
+                width=CN, height=CN,
+                bgcolor=num_bg(num),
+                border=ft.Border.all(3 if lit else 0.5,
+                                     '#f1c40f' if lit else '#444'),
+                border_radius=6,
+                content=ft.Column(
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[ft.Text(str(num), size=14, color=ft.Colors.WHITE,
+                                      weight=ft.FontWeight.BOLD,
+                                      text_align=ft.TextAlign.CENTER)],
+                ),
+            )
+
+
+        ROW_W = CN * 3 + GAP * 2   # exact pixel width of a number row
+
+        zero_row = ft.Container(
+            width=ROW_W, height=CELL * 2,
+            bgcolor='#27ae60',
+            border=ft.Border.all(3 if 0 in all_nums else 0.5,
+                                 '#f1c40f' if 0 in all_nums else '#444'),
+            border_radius=6,
+            alignment=ft.Alignment(0, 0),
+            content=ft.Text("0", size=14, color=ft.Colors.WHITE,
+                            weight=ft.FontWeight.BOLD,
+                            text_align=ft.TextAlign.CENTER),
+        )
+
+        num_rows = []
+        for i in range(12):
+            base = i * 3
+            a, b, c = base + 1, base + 2, base + 3
+            num_rows.append(
+                ft.Row([make_cell(a), make_cell(b), make_cell(c)],
+                       spacing=GAP, tight=True)
+            )
+
+        grid = ft.Container(
+            width=ROW_W,
+            content=ft.Column(
+                controls=[zero_row] + num_rows,
+                spacing=GAP,
+                tight=True,
+            ),
+        )
+
+
+        dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
+
+        def on_cancel(_ev):
+            dlg.open = False
+            self.page.update()
+
+        def cerrar(_ev):
+            dlg.open = False
+            self.page.update()
+            on_ready_cb()
+
+        dlg.title = ft.Column(
+            tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    controls=title_chips + [ft.Container(width=6)] + [
+                        ft.Text(f"${chip_per_num:.2f}/num",
+                                color='#f1c40f', size=13,
+                                weight=ft.FontWeight.BOLD),
+                    ],
+                ),
+            ],
+        )
+        dlg.content = ft.Column(
+            tight=True,
+            scroll=ft.ScrollMode.AUTO,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Container(height=4),
+                grid,
+                ft.Container(height=8),
+                ft.Text(
+                    f"Total: ${total_cost:.2f}  ({len(all_nums)} × ${chip_per_num:.2f})",
+                    color='#ecf0f1', size=12, weight=ft.FontWeight.BOLD,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            ],
+        )
+        dlg.actions = [
+            ft.ElevatedButton(
+                content=ft.Text("CANCEL", size=13, weight=ft.FontWeight.BOLD),
+                on_click=on_cancel, expand=1,
+                style=ft.ButtonStyle(bgcolor='#c0392b', color=ft.Colors.WHITE),
+            ),
+            ft.ElevatedButton(
+                content=ft.Text("READY", size=13, weight=ft.FontWeight.BOLD),
+                on_click=cerrar, expand=1,
+                style=ft.ButtonStyle(bgcolor='#27ae60', color=ft.Colors.WHITE),
+            ),
+        ]
+        dlg.actions_alignment = ft.MainAxisAlignment.CENTER
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
 
     def _activate_bet(self):
         self.activa = True
@@ -1571,15 +1717,28 @@ class LinupApp:
         dlg.open = True
         self.page.update()
 
+    def _has_straight(self):
+        return any(g in self.GRUPOS_STRAIGHT for g in self.grupos_activos)
+
+    def _proceed_bet(self):
+        self._check_pre_bet_warning(self._activate_bet)
+
     def confirmar_manual(self, e=None):
-        if self.grupos_activos:
-            self._check_pre_bet_warning(self._activate_bet)
+        if not self.grupos_activos:
+            return
+        if self._has_straight():
+            self._show_roulette_chip_popup(self._proceed_bet)
+        else:
+            self._proceed_bet()
 
     def auto_invertir_sug(self, grupos):
         self.limpiar_seleccion_visual()
         self.grupos_activos = list(grupos)
         self._refresh_mixer_colors()
-        self._check_pre_bet_warning(self._activate_bet)
+        if self._has_straight():
+            self._show_roulette_chip_popup(self._proceed_bet)
+        else:
+            self._proceed_bet()
 
     # ──────────────────────────────────────────────────────────────────
     # SUGGESTIONS
@@ -1686,6 +1845,12 @@ class LinupApp:
     def corregir_ultimo(self, e=None):
         if self.history_nums:
             self.history_nums.pop()
+            if self.sliding_window:
+                self.sliding_window.pop()
+            # Reverse bank
+            self.banca_actual -= self.last_bank_delta
+            self.last_bank_delta = 0.0
+            # Reverse progression
             if self.last_bet_outside is True:
                 if self.idx_fibo_out > 0:
                     self.idx_fibo_out -= 1
@@ -1696,6 +1861,7 @@ class LinupApp:
                     self.idx_fibo_in -= 1
                 if self.nivel_martingala_in > 0:
                     self.nivel_martingala_in -= 1
+            self.last_bet_outside = None
             self.update_ui()
             self.update_registration_table()
 
