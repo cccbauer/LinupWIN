@@ -35,10 +35,12 @@ jobs:
         run: flutter config --enable-windows-desktop
 
       - name: Build Windows EXE
-        env:
-          PYTHONUTF8: "1"
-          PYTHONIOENCODING: "utf-8"
-        run: flet build windows --no-rich-output
+        shell: cmd
+        run: |
+          chcp 65001
+          set PYTHONUTF8=1
+          set PYTHONIOENCODING=utf-8
+          flet build windows --no-rich-output
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
