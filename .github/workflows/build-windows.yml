@@ -35,6 +35,9 @@ jobs:
         run: flutter config --enable-windows-desktop
 
       - name: Build Windows EXE
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         run: flet build windows --no-rich-output
 
       - name: Upload EXE artifact
