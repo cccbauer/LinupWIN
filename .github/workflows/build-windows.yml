@@ -23,14 +23,24 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install "flet>=0.25.0"
+          pip install --upgrade "rich>=13.7"
 
       - name: Build Windows EXE
         shell: pwsh
         env:
           PYTHONUTF8: "1"
           PYTHONIOENCODING: "utf-8"
-          WT_SESSION: "1"
         run: |
+          # Enable VT processing on stdout so rich uses ANSI instead of Win32 API
+          $kernel32 = Add-Type -Name 'Kernel32VT' -Namespace '' -PassThru -MemberDefinition @'
+          [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int h);
+          [DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out int m);
+          [DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, int m);
+'@
+          $h = $kernel32::GetStdHandle(-11)
+          $m = 0
+          [void]$kernel32::GetConsoleMode($h, [ref]$m)
+          [void]$kernel32::SetConsoleMode($h, $m -bor 0x0004)
           echo y | flet build windows --no-rich-output
 
       - name: Upload EXE artifact
