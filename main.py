@@ -118,9 +118,32 @@ class LinupApp:
                 )
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS table_stats "
-                    "(mesa TEXT PRIMARY KEY, wins INTEGER DEFAULT 0, "
-                    " losses INTEGER DEFAULT 0, last_bank REAL DEFAULT 0)"
+                    "(investment_id INTEGER NOT NULL DEFAULT 0, mesa TEXT NOT NULL, "
+                    " wins INTEGER DEFAULT 0, losses INTEGER DEFAULT 0, "
+                    " last_bank REAL DEFAULT 0, "
+                    " PRIMARY KEY (investment_id, mesa))"
                 )
+                # Migration: if old schema had mesa as sole PK, rebuild with investment_id
+                try:
+                    cols = [r[1] for r in conn.execute(
+                        "PRAGMA table_info(table_stats)").fetchall()]
+                    if 'investment_id' not in cols:
+                        conn.execute(
+                            "ALTER TABLE table_stats RENAME TO table_stats_old")
+                        conn.execute(
+                            "CREATE TABLE table_stats "
+                            "(investment_id INTEGER NOT NULL DEFAULT 0, mesa TEXT NOT NULL, "
+                            " wins INTEGER DEFAULT 0, losses INTEGER DEFAULT 0, "
+                            " last_bank REAL DEFAULT 0, "
+                            " PRIMARY KEY (investment_id, mesa))")
+                        conn.execute(
+                            "INSERT INTO table_stats "
+                            "(investment_id, mesa, wins, losses, last_bank) "
+                            "SELECT 0, mesa, wins, losses, last_bank FROM table_stats_old")
+                        conn.execute("DROP TABLE table_stats_old")
+                        conn.commit()
+                except Exception:
+                    pass
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS investments "
                     "(id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -193,15 +216,16 @@ class LinupApp:
         if not conn:
             return
         try:
-            w  = 0 if profit == 0 else (1 if is_win else 0)
-            l  = 0 if profit == 0 else (0 if is_win else 1)
-            bk = round(float(self.banca_actual), 2)
+            w    = 0 if profit == 0 else (1 if is_win else 0)
+            l    = 0 if profit == 0 else (0 if is_win else 1)
+            bk   = round(float(self.banca_actual), 2)
+            inv  = self.current_investment_id or 0
             conn.execute(
-                "INSERT INTO table_stats (mesa, wins, losses, last_bank) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(mesa) DO UPDATE SET "
+                "INSERT INTO table_stats (investment_id, mesa, wins, losses, last_bank) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(investment_id, mesa) DO UPDATE SET "
                 "wins=wins+?, losses=losses+?, last_bank=?",
-                (self.nombre_mesa, w, l, bk, w, l, bk)
+                (inv, self.nombre_mesa, w, l, bk, w, l, bk)
             )
             conn.commit()
         except Exception:
@@ -223,6 +247,7 @@ class LinupApp:
         self.last_bank_delta      = 0.0
         self.stop_loss_triggered  = False
         self.activa               = False
+        self.free_spin_mode       = False
         self.grupos_activos       = []
         self.history_nums         = []
         self.sliding_window       = deque(maxlen=6)
@@ -534,8 +559,9 @@ class LinupApp:
                 all_tdata = []  # (mesa_name, init_bank, wins, losses, last_bank)
                 for mesa_name, init_bank in inv_tables:
                     cursor.execute(
-                        "SELECT wins, losses, last_bank FROM table_stats WHERE mesa=?",
-                        (mesa_name,)
+                        "SELECT wins, losses, last_bank FROM table_stats "
+                        "WHERE investment_id=? AND mesa=?",
+                        (investment_id, mesa_name)
                     )
                     stats = cursor.fetchone()
                     if stats and (stats[0] or stats[1]):
@@ -666,7 +692,8 @@ class LinupApp:
                     wins = losses = 0
                     for mn in mesa_names:
                         cursor2.execute(
-                            "SELECT wins, losses FROM table_stats WHERE mesa=?", (mn,)
+                            "SELECT wins, losses FROM table_stats "
+                            "WHERE investment_id=? AND mesa=?", (inv_id, mn)
                         )
                         s = cursor2.fetchone()
                         if s:
@@ -930,6 +957,12 @@ class LinupApp:
         sug_fin  = round(sug_bank / 225, 6)
         sug_fout = round(sug_bank / 26, 4)
 
+        def _f(val):
+            try:
+                return float(val)
+            except Exception:
+                return 0.0
+
         def _chip_label_text(chip_val, bank, multiplier_sum):
             """chip_val × multiplier_sum = total 3-loss cost; % relative to bank"""
             try:
@@ -962,7 +995,7 @@ class LinupApp:
 
         def _on_bank_change(e):
             try:
-                bk       = float(self.banca_input.value or 0)
+                bk       = _f(self.banca_input.value)
                 fin_val  = round(bk / 225, 6)
                 fout_val = round(bk / 26, 4)
                 self.fin_input.value  = str(fin_val)
@@ -978,9 +1011,9 @@ class LinupApp:
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
             keyboard_type=ft.KeyboardType.NUMBER,
             on_change=lambda e: _refresh_labels(
-                float(self.banca_input.value or 0),
-                float(self.fin_input.value or 0),
-                float(self.fout_input.value or 0),
+                _f(self.banca_input.value),
+                _f(self.fin_input.value),
+                _f(self.fout_input.value),
             ),
         )
         self.fout_input = ft.TextField(
@@ -988,9 +1021,9 @@ class LinupApp:
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
             keyboard_type=ft.KeyboardType.NUMBER,
             on_change=lambda e: _refresh_labels(
-                float(self.banca_input.value or 0),
-                float(self.fin_input.value or 0),
-                float(self.fout_input.value or 0),
+                _f(self.banca_input.value),
+                _f(self.fin_input.value),
+                _f(self.fout_input.value),
             ),
         )
         self.banca_input = ft.TextField(
@@ -999,6 +1032,30 @@ class LinupApp:
             keyboard_type=ft.KeyboardType.NUMBER,
             on_change=_on_bank_change,
         )
+        self.free_spin_mode = False
+        _fs_lbl = ft.Text("FREE SPIN: OFF", color=ft.Colors.WHITE,
+                          weight=ft.FontWeight.BOLD)
+        _fs_ref = [None]   # forward ref so toggle can update the button
+
+        def _toggle_free_spin(e):
+            self.free_spin_mode = not self.free_spin_mode
+            on = self.free_spin_mode
+            _fs_lbl.value       = "FREE SPIN: ON" if on else "FREE SPIN: OFF"
+            _fs_ref[0].style    = ft.ButtonStyle(
+                bgcolor='#e67e22' if on else '#555555',
+                color=ft.Colors.WHITE,
+            )
+            _fs_lbl.update()
+            _fs_ref[0].update()
+
+        free_spin_btn = ft.ElevatedButton(
+            content=_fs_lbl,
+            height=50, expand=True,
+            style=ft.ButtonStyle(bgcolor='#555555', color=ft.Colors.WHITE),
+            on_click=_toggle_free_spin,
+        )
+        _fs_ref[0] = free_spin_btn
+
         btn_txt = "RESUME TABLE" if is_continue else "OPEN TABLE"
         self._set_view(
             ft.Container(
@@ -1021,6 +1078,8 @@ class LinupApp:
                         self.fout_label,
                         self.fout_input,
                         ft.Container(height=10),
+                        free_spin_btn,
+                        ft.Container(height=6),
                         ft.ElevatedButton(
                             btn_txt, on_click=self.iniciar_ciclo,
                             height=70, expand=True,
@@ -1541,7 +1600,11 @@ class LinupApp:
                 self.grupos_activos = []
                 self.limpiar_seleccion_visual()
             else:
-                delta = self.val_fin * (1 if num in ROJOS else -1)
+                if self.free_spin_mode:
+                    # Red + Black: net 0 unless 0 falls (lose both)
+                    delta = -2 * self.val_fin if num == 0 else 0.0
+                else:
+                    delta = self.val_fin * (1 if num in ROJOS else -1)
                 self.banca_actual      += delta
                 self.last_bank_delta    = delta
                 self.last_bet_outside   = None
