@@ -952,10 +952,10 @@ class LinupApp:
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
             read_only=True,
         )
-        # 3 losses = 100% bank: chip_in × 225 = bank, chip_out × 26 = bank
-        sug_bank = self.banca_actual
-        sug_fin  = round(sug_bank / 225, 6)
-        sug_fout = round(sug_bank / 26, 4)
+        sug_bank     = self.banca_actual
+        sug_max_loss = 100.0   # default: 3 losses = 100% bank
+        sug_fin      = round(sug_bank * (sug_max_loss / 100) / 225, 6)
+        sug_fout     = round(sug_bank * (sug_max_loss / 100) / 26,  4)
 
         def _f(val):
             try:
@@ -963,41 +963,46 @@ class LinupApp:
             except Exception:
                 return 0.0
 
-        def _chip_label_text(chip_val, bank, multiplier_sum):
+        def _chips_from(bk, loss_pct):
+            """Return (fin, fout) given bank and max-loss %."""
+            factor = bk * max(loss_pct, 0) / 100
+            return round(factor / 225, 6), round(factor / 26, 4)
+
+        def _chip_label_text(chip_val, bank, multiplier_sum, max_loss_pct):
             """chip_val × multiplier_sum = total 3-loss cost; % relative to bank"""
             try:
                 pct      = (chip_val / bank * 100) if bank > 0 else 0
                 loss     = chip_val * multiplier_sum
                 loss_pct = (loss / bank * 100) if bank > 0 else 0
-                return f"({pct:.4f}% bank · 3 losses = ${loss:.2f} = {loss_pct:.1f}% bank)"
+                return (f"({pct:.4f}% bank · 3 losses = ${loss:.2f}"
+                        f" = {loss_pct:.1f}% / {max_loss_pct:.0f}% bank)")
             except Exception:
                 return ""
 
-        # IN: 25 avg chips × sum([1,3,5]) = 225  →  3 losses = 100% bank
-        # OUT: sum([2,6,18]) = 26               →  3 losses = 100% bank
         self.fin_label  = ft.Text(
-            f"CHIP IN {_chip_label_text(sug_fin,  sug_bank, 225)}:",
+            f"CHIP IN {_chip_label_text(sug_fin,  sug_bank, 225, sug_max_loss)}:",
             color=ft.Colors.WHITE,
         )
         self.fout_label = ft.Text(
-            f"CHIP OUT {_chip_label_text(sug_fout, sug_bank, 26)}:",
+            f"CHIP OUT {_chip_label_text(sug_fout, sug_bank, 26,  sug_max_loss)}:",
             color=ft.Colors.WHITE,
         )
 
         def _refresh_labels(bank, fin_val, fout_val):
-            self.fin_label.value  = f"CHIP IN {_chip_label_text(fin_val,  bank, 225)}:"
-            self.fout_label.value = f"CHIP OUT {_chip_label_text(fout_val, bank, 26)}:"
+            ml = _f(self.max_loss_input.value)
+            self.fin_label.value  = f"CHIP IN {_chip_label_text(fin_val,  bank, 225, ml)}:"
+            self.fout_label.value = f"CHIP OUT {_chip_label_text(fout_val, bank, 26,  ml)}:"
             try:
                 self.fin_label.update()
                 self.fout_label.update()
             except Exception:
                 pass
 
-        def _on_bank_change(e):
+        def _recalc(e=None):
             try:
-                bk       = _f(self.banca_input.value)
-                fin_val  = round(bk / 225, 6)
-                fout_val = round(bk / 26, 4)
+                bk  = _f(self.banca_input.value)
+                ml  = _f(self.max_loss_input.value)
+                fin_val, fout_val = _chips_from(bk, ml)
                 self.fin_input.value  = str(fin_val)
                 self.fout_input.value = str(fout_val)
                 self.fin_input.update()
@@ -1006,11 +1011,21 @@ class LinupApp:
             except Exception:
                 pass
 
+        def _on_bank_change(e):
+            _recalc()
+
+        self.max_loss_input = ft.TextField(
+            value=str(sug_max_loss),
+            bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            on_change=lambda e: _recalc(),
+        )
+
         self.fin_input = ft.TextField(
             value=str(sug_fin),
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
             keyboard_type=ft.KeyboardType.NUMBER,
-            on_change=lambda e: _refresh_labels(
+            on_change=lambda _e: _refresh_labels(
                 _f(self.banca_input.value),
                 _f(self.fin_input.value),
                 _f(self.fout_input.value),
@@ -1020,7 +1035,7 @@ class LinupApp:
             value=str(sug_fout),
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
             keyboard_type=ft.KeyboardType.NUMBER,
-            on_change=lambda e: _refresh_labels(
+            on_change=lambda _e: _refresh_labels(
                 _f(self.banca_input.value),
                 _f(self.fin_input.value),
                 _f(self.fout_input.value),
@@ -1073,6 +1088,8 @@ class LinupApp:
                         self.table_input,
                         ft.Text("BANK:", color=ft.Colors.WHITE),
                         self.banca_input,
+                        ft.Text("MAX LOSS %:", color=ft.Colors.WHITE),
+                        self.max_loss_input,
                         self.fin_label,
                         self.fin_input,
                         self.fout_label,
