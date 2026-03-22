@@ -3,9 +3,10 @@ from collections import deque
 import sqlite3
 import os
 import math
+import random
+import tempfile
 from datetime import datetime
 import asyncio
-import tempfile
 
 # --- GROUP CONFIGURATION ---
 ROJOS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
@@ -15,15 +16,22 @@ GRUPOS_MAESTROS = {
     '36': {3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36},
     '1a': set(range(1, 13)), '2a': set(range(13, 25)), '3a': set(range(25, 37)),
     'Z0': {0, 3, 12, 15, 26, 32, 35},
-    'ZG': {0, 2, 3, 4, 7, 12, 15, 18, 21, 19, 22, 25, 26, 28, 29, 32, 35},
+    'ZG': {2, 4, 7, 18, 21, 19, 22, 25, 28, 29},
     'ZP': {5, 8, 10, 11, 13, 16, 23, 24, 27, 30, 33, 36},
     'H':  {1, 6, 9, 14, 17, 20, 31, 34},
     'T1': {2, 4, 6, 13, 15, 17, 19, 21, 25, 27, 32, 34},
     'T2': {1, 5, 8, 10, 11, 16, 20, 23, 24, 30, 33, 36},
     'T3': {0, 3, 7, 9, 12, 14, 18, 22, 26, 28, 29, 31, 35},
+    # Wave zones — wheel position relative to 0
+    # W1 Lip:    0 + 6 each side  → 13 numbers
+    'W1': {0, 2, 3, 4, 7, 12, 15, 19, 21, 26, 28, 32, 35},
+    # W2 Curls:  next 6 each side → 12 numbers
+    'W2': {6, 9, 13, 14, 17, 18, 22, 25, 27, 29, 31, 34},
+    # W3 Through: remaining       → 12 numbers
+    'W3': {1, 5, 8, 10, 11, 16, 20, 23, 24, 30, 33, 36},
 }
 PROG_FIBO = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55]
-C_COL, C_DOC, C_SEC, C_SET = '#00d2ff', '#2ecc71', '#e67e22', '#9b59b6'
+C_COL, C_DOC, C_SEC, C_SET, C_WAV = '#00d2ff', '#2ecc71', '#e67e22', '#9b59b6', '#e91e63'
 NUM_COLS = 20
 
 
@@ -43,7 +51,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v11.5"
+        self.page.title      = "Linup v12.0"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -83,8 +91,16 @@ class LinupApp:
     # RESPONSIVE COLUMN WIDTH
     # ──────────────────────────────────────────────────────────────────
     def _col_width(self):
-        w = self.page.width or 360
-        return max(13, int((w - 4) / NUM_COLS))
+        w  = self.page.width or 360
+        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave']})
+        n  = (1
+              + (6 if vc.get('basic',  True) else 0)
+              + (3 if vc.get('cols',   True) else 0)
+              + (3 if vc.get('docs',   True) else 0)
+              + (4 if vc.get('secs',   True) else 0)
+              + (3 if vc.get('thirds', True) else 0)
+              + (3 if vc.get('wave',   True) else 0))
+        return max(11, int((w - 4) / max(n, 1)))
 
     def _on_resize(self, e):
         if self._on_game_screen and self.reg_rows_box is not None:
@@ -258,6 +274,16 @@ class LinupApp:
         self.inv_name             = ""
         self.inv_capital          = 0.0
         self.inv_other_pl         = 0.0
+        # Which column categories are shown in the registration table / mixer
+        if not hasattr(self, 'visible_cats'):
+            self.visible_cats = {
+                'basic':  True,   # R N P I B A
+                'cols':   True,   # 34 35 36
+                'docs':   True,   # 1a 2a 3a
+                'secs':   True,   # Z0 ZG ZP H
+                'thirds': True,   # T1 T2 T3
+                'wave':   True,   # W1 W2 W3
+            }
 
     # ──────────────────────────────────────────────────────────────────
     # NAVIGATION
@@ -289,7 +315,7 @@ class LinupApp:
                         ft.Text("Linup", color='#3498db', size=64,
                                 weight=ft.FontWeight.BOLD),
                         ft.Container(height=8),
-                        ft.Text("v11.5", color='#7f8c8d', size=18),
+                        ft.Text("v12.0", color='#7f8c8d', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -581,7 +607,7 @@ class LinupApp:
 
                     total = wins + losses
                     eff   = (wins / total * 100) if total > 0 else 0.0
-                    color = '#2ecc71' if (total == 0 or eff >= 50) else '#e74c3c'
+                    color = '#2ecc71' if (total == 0 or eff >= 50) else '#ff4444'
                     if total == 0:
                         txt = f"{mesa_name}  |  ${last_bank:.2f}  |  New"
                     else:
@@ -616,7 +642,7 @@ class LinupApp:
                     # Efficiency = avg per-table W/L ratio across tables that have played
                     played = [(d[2], d[3]) for d in all_tdata if d[2] + d[3] > 0]
                     te     = (sum(w / (w + l) * 100 for w, l in played) / len(played)) if played else 0.0
-                    tc     = '#2ecc71' if total_pl >= 0 else '#e74c3c'
+                    tc     = '#2ecc71' if total_pl >= 0 else '#ff4444'
                     pl_sign  = "+" if total_pl >= 0 else ""
                     pl_pct   = (total_pl / float(inv_capital) * 100) if inv_capital else 0.0
                     eff_txt  = f"EFF: {te:.0f}%  W:{total_wins} L:{total_losses}\n" if played else ""
@@ -629,8 +655,33 @@ class LinupApp:
                             text_align=ft.TextAlign.CENTER,
                         ),
                     ))
+
+                # ── Compound interest section ──────────────────────────
+                num_sessions = total_wins + total_losses
+                per_session_rate = (
+                    (total_pl / float(inv_capital) / num_sessions)
+                    if (num_sessions > 0 and float(inv_capital) > 0) else 0.0
+                )
+                table_rows.append(ft.Container(height=16))
+                table_rows.append(
+                    self._build_compound_widget(7, float(inv_capital), per_session_rate, te)
+                )
+                table_rows.append(ft.Container(height=6))
+
+                def _open_custom(ev, r=per_session_rate, c=float(inv_capital),
+                                 n=inv_name, iid=investment_id, e=te):
+                    self.show_compound_custom_view(iid, n, c, r, e)
+
+                table_rows.append(
+                    ft.ElevatedButton(
+                        "CUSTOM PERIOD",
+                        on_click=_open_custom,
+                        height=45, expand=True,
+                        style=ft.ButtonStyle(bgcolor='#2980b9', color=ft.Colors.WHITE),
+                    )
+                )
             except Exception as ex:
-                table_rows.append(ft.Text(f"Error: {ex}", color='#e74c3c'))
+                table_rows.append(ft.Text(f"Error: {ex}", color='#ff4444'))
             finally:
                 conn.close()
 
@@ -671,6 +722,186 @@ class LinupApp:
         )
 
     # ──────────────────────────────────────────────────────────────────
+    # COMPOUND INTEREST WIDGET
+    # ──────────────────────────────────────────────────────────────────
+    def _build_compound_widget(self, periods: int, start_capital: float,
+                               rate: float, efficiency: float = 0.0):
+        # efficiency: 0–100 (e.g. 70 → 70 % win rate)
+        eff      = max(0.0, min(100.0, efficiency)) / 100.0
+        denom    = 2 * eff - 1
+        # Derive symmetric win/loss rate so that the weighted average == rate
+        r        = (rate / denom) if abs(denom) > 0.01 else abs(rate)
+        r        = abs(r)
+
+        # Random W/L sequence matching the efficiency ratio
+        wins_n   = round(periods * eff)
+        losses_n = periods - wins_n
+        wl_seq   = ['W'] * wins_n + ['L'] * losses_n
+        random.shuffle(wl_seq)
+
+        rate_txt = f"{rate * 100:+.2f}% / session  ·  EFF {efficiency:.0f}%"
+
+        def _cell(text, color, expand, bold=False, size=13):
+            return ft.Container(
+                expand=expand,
+                content=ft.Text(
+                    text, color=color, size=size,
+                    text_align=ft.TextAlign.CENTER,
+                    weight=ft.FontWeight.BOLD if bold else ft.FontWeight.NORMAL,
+                ),
+            )
+
+        def _red_cell(text, expand):
+            return ft.Container(
+                expand=expand,
+                bgcolor='#3d0000', border_radius=4,
+                padding=ft.padding.symmetric(vertical=1),
+                content=ft.Text(
+                    text, color='#ff4444', size=13,
+                    text_align=ft.TextAlign.CENTER,
+                    weight=ft.FontWeight.BOLD,
+                ),
+            )
+
+        def _badge(label, win):
+            return ft.Container(
+                expand=1,
+                bgcolor='#1a3d1a' if win else '#3d0000',
+                border_radius=4,
+                padding=ft.padding.symmetric(vertical=1),
+                content=ft.Text(
+                    label,
+                    color='#2ecc71' if win else '#ff4444',
+                    size=12, weight=ft.FontWeight.BOLD,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            )
+
+        header = ft.Row([
+            _cell("DAY",  '#7f8c8d', 1, bold=True),
+            _cell("RES",  '#7f8c8d', 1, bold=True),
+            _cell("CAPITAL", '#7f8c8d', 2, bold=True),
+            _cell("GAIN",    '#7f8c8d', 2, bold=True),
+            _cell("TOT%",    '#7f8c8d', 1, bold=True),
+        ], spacing=3)
+
+        # Day 0 — starting capital
+        data_rows = [ft.Row([
+            _cell("0",                     '#7f8c8d', 1),
+            _cell("—",                     '#7f8c8d', 1),
+            _cell(f"${start_capital:.2f}", ft.Colors.WHITE, 2),
+            _cell("—",                     '#7f8c8d', 2),
+            _cell("0.0%",                  '#7f8c8d', 1),
+        ], spacing=3)]
+
+        cap = start_capital
+        for i, result in enumerate(wl_seq, start=1):
+            win     = (result == 'W')
+            new_cap = cap * (1 + r) if win else cap * (1 - r)
+            gain    = new_cap - cap
+            total_gain = new_cap - start_capital
+            total_pct  = (total_gain / start_capital * 100) if start_capital > 0 else 0.0
+            cap     = new_cap
+
+            gain_txt = f"{'+' if gain >= 0 else ''}{gain:.2f}"
+            pct_txt  = f"{'+' if total_pct >= 0 else ''}{total_pct:.1f}%"
+
+            gain_cell = _cell(gain_txt, '#2ecc71', 2) if win else _red_cell(gain_txt, 2)
+            pct_cell  = _cell(pct_txt,  '#2ecc71', 1) if win else _red_cell(pct_txt,  1)
+
+            data_rows.append(ft.Row([
+                _cell(str(i),            ft.Colors.WHITE, 1),
+                _badge(result, win),
+                _cell(f"${new_cap:.2f}", ft.Colors.WHITE, 2),
+                gain_cell,
+                pct_cell,
+            ], spacing=3))
+
+        return ft.Container(
+            bgcolor='#1a2535', padding=10, border_radius=8,
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "COMPOUND GROWTH",
+                        color='#3498db', size=14, weight=ft.FontWeight.BOLD,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        rate_txt,
+                        color='#5dade2', size=12,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Container(height=4),
+                    header,
+                    ft.Divider(color='#333333', height=1),
+                ] + data_rows,
+                spacing=4, tight=True,
+            ),
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # COMPOUND INTEREST — CUSTOM PERIOD VIEW
+    # ──────────────────────────────────────────────────────────────────
+    def show_compound_custom_view(self, investment_id, inv_name: str,
+                                  inv_capital: float, rate: float, efficiency: float = 0.0):
+        periods_field = ft.TextField(
+            value="30",
+            bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            expand=True,
+        )
+        result_col = ft.Column([], tight=True)
+
+        def generate(ev=None):
+            try:
+                p = max(1, min(730, int(periods_field.value or 30)))
+            except Exception:
+                p = 30
+            result_col.controls = [self._build_compound_widget(p, inv_capital, rate, efficiency)]
+            result_col.update()
+
+        def go_back(ev):
+            self.show_investment_dashboard(investment_id)
+
+        self._set_view(
+            ft.Container(
+                bgcolor='#1a1a1a', expand=True, padding=20,
+                content=ft.ListView(
+                    expand=True,
+                    controls=[
+                        ft.ElevatedButton(
+                            "←  BACK", on_click=go_back,
+                            style=ft.ButtonStyle(bgcolor='#c0392b',
+                                                 color=ft.Colors.WHITE),
+                        ),
+                        ft.Container(height=12),
+                        ft.Text(
+                            f"{inv_name}  —  CUSTOM COMPOUND PERIOD",
+                            color='#3498db', size=14, weight=ft.FontWeight.BOLD,
+                        ),
+                        ft.Text(
+                            f"Base: ${inv_capital:.2f}  |  Rate: {rate * 100:+.2f}% / session",
+                            color='#7f8c8d', size=12,
+                        ),
+                        ft.Container(height=10),
+                        ft.Row([
+                            ft.Text("PERIODS:", color=ft.Colors.WHITE),
+                            periods_field,
+                            ft.ElevatedButton(
+                                "GENERATE", on_click=generate,
+                                style=ft.ButtonStyle(bgcolor='#27ae60',
+                                                     color=ft.Colors.WHITE),
+                            ),
+                        ], spacing=8),
+                        ft.Container(height=10),
+                        result_col,
+                    ],
+                ),
+            )
+        )
+        generate()   # auto-generate on open
+
+    # ──────────────────────────────────────────────────────────────────
     # LOAD INVESTMENT
     # ──────────────────────────────────────────────────────────────────
     def show_load_investments(self, e=None):
@@ -701,7 +932,7 @@ class LinupApp:
                             losses += s[1] or 0
                     total    = wins + losses
                     eff      = (wins / total * 100) if total > 0 else 0.0
-                    color    = '#2ecc71' if (total == 0 or eff >= 50) else '#e74c3c'
+                    color    = '#2ecc71' if (total == 0 or eff >= 50) else '#ff4444'
                     n_tables = len(mesa_names)
                     if total > 0:
                         txt = (f"{name}  |  ${capital:.2f}"
@@ -738,7 +969,7 @@ class LinupApp:
                         )
                     )
             except Exception as ex:
-                rows.append(ft.Text(f"Error: {ex}", color='#e74c3c'))
+                rows.append(ft.Text(f"Error: {ex}", color='#ff4444'))
             finally:
                 conn.close()
 
@@ -875,7 +1106,7 @@ class LinupApp:
                 dlg.open = False
                 self.page.update()
 
-            dlg.title = ft.Text("DELETE INVESTMENT", color='#e74c3c',
+            dlg.title = ft.Text("DELETE INVESTMENT", color='#ff4444',
                                 size=16, weight=ft.FontWeight.BOLD,
                                 text_align=ft.TextAlign.CENTER)
             dlg.content = ft.Text(
@@ -890,7 +1121,7 @@ class LinupApp:
                 ),
                 ft.ElevatedButton(
                     "DELETE", on_click=confirm_delete, expand=1,
-                    style=ft.ButtonStyle(bgcolor='#e74c3c', color=ft.Colors.WHITE),
+                    style=ft.ButtonStyle(bgcolor='#ff4444', color=ft.Colors.WHITE),
                 ),
             ]
             dlg.actions_alignment = ft.MainAxisAlignment.CENTER
@@ -953,7 +1184,7 @@ class LinupApp:
             read_only=True,
         )
         sug_bank     = self.banca_actual
-        sug_max_loss = 100.0   # default: 3 losses = 100% bank
+        sug_max_loss = 33.0    # default: 3 losses = 33% bank
         sug_fin      = round(sug_bank * (sug_max_loss / 100) / 225, 6)
         sug_fout     = round(sug_bank * (sug_max_loss / 100) / 26,  4)
 
@@ -1071,6 +1302,27 @@ class LinupApp:
         )
         _fs_ref[0] = free_spin_btn
 
+        vc = self.visible_cats
+        self.cb_basic  = ft.Checkbox(label="Basic  (R N P I B A)", value=vc['basic'],
+                                     fill_color='#555555', check_color=ft.Colors.WHITE,
+                                     label_style=ft.TextStyle(color=ft.Colors.WHITE, size=13))
+        self.cb_cols   = ft.Checkbox(label="Columns  (34 35 36)",  value=vc['cols'],
+                                     fill_color=C_COL, check_color=ft.Colors.WHITE,
+                                     label_style=ft.TextStyle(color=ft.Colors.WHITE, size=13))
+        self.cb_docs   = ft.Checkbox(label="Dozens  (1a 2a 3a)",   value=vc['docs'],
+                                     fill_color=C_DOC, check_color=ft.Colors.WHITE,
+                                     label_style=ft.TextStyle(color=ft.Colors.WHITE, size=13))
+        self.cb_secs   = ft.Checkbox(label="Sectors  (Z0 ZG ZP H)", value=vc['secs'],
+                                     fill_color=C_SEC, check_color=ft.Colors.WHITE,
+                                     label_style=ft.TextStyle(color=ft.Colors.WHITE, size=13))
+        self.cb_thirds = ft.Checkbox(label="Thirds  (T1 T2 T3)",   value=vc['thirds'],
+                                     fill_color=C_SET, check_color=ft.Colors.WHITE,
+                                     label_style=ft.TextStyle(color=ft.Colors.WHITE, size=13))
+        self.cb_wave   = ft.Checkbox(label="Wave  (W1 Lip · W2 Curls · W3 Through)",
+                                     value=vc['wave'],
+                                     fill_color=C_WAV, check_color=ft.Colors.WHITE,
+                                     label_style=ft.TextStyle(color=ft.Colors.WHITE, size=13))
+
         btn_txt = "RESUME TABLE" if is_continue else "OPEN TABLE"
         self._set_view(
             ft.Container(
@@ -1096,6 +1348,15 @@ class LinupApp:
                         self.fout_input,
                         ft.Container(height=10),
                         free_spin_btn,
+                        ft.Container(height=10),
+                        ft.Text("TABLE COLUMNS:", color='#7f8c8d', size=12,
+                                weight=ft.FontWeight.BOLD),
+                        self.cb_basic,
+                        self.cb_cols,
+                        self.cb_docs,
+                        self.cb_secs,
+                        self.cb_thirds,
+                        self.cb_wave,
                         ft.Container(height=6),
                         ft.ElevatedButton(
                             btn_txt, on_click=self.iniciar_ciclo,
@@ -1118,6 +1379,18 @@ class LinupApp:
             self.banca_actual  = self.banca_inicial
             self.val_fin       = float(self.fin_input.value)  if self.fin_input.value  else round(self.banca_inicial / 225, 6)
             self.val_fout      = float(self.fout_input.value) if self.fout_input.value else round(self.banca_inicial / 26, 4)
+        except Exception:
+            pass
+        # Read column visibility checkboxes
+        try:
+            self.visible_cats = {
+                'basic':  bool(self.cb_basic.value),
+                'cols':   bool(self.cb_cols.value),
+                'docs':   bool(self.cb_docs.value),
+                'secs':   bool(self.cb_secs.value),
+                'thirds': bool(self.cb_thirds.value),
+                'wave':   bool(self.cb_wave.value),
+            }
         except Exception:
             pass
         self.show_game_screen()
@@ -1143,7 +1416,7 @@ class LinupApp:
         ok, err_msg    = self._guardar_sesion()
         self._update_table_stats(False)
         guardado_txt   = "Saved to history" if ok else f"Error: {err_msg}"
-        guardado_color = '#2ecc71' if ok else '#e74c3c'
+        guardado_color = '#2ecc71' if ok else '#ff4444'
 
         dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
 
@@ -1154,7 +1427,7 @@ class LinupApp:
 
         dlg.title = ft.Text(
             "STOP LOSS",
-            color='#e74c3c', size=18, weight=ft.FontWeight.BOLD,
+            color='#ff4444', size=18, weight=ft.FontWeight.BOLD,
             text_align=ft.TextAlign.CENTER,
         )
         dlg.content = ft.Column(
@@ -1162,7 +1435,7 @@ class LinupApp:
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             controls=[
                 ft.Divider(color='#444444'),
-                ft.Text("45% loss limit reached.", color='#e74c3c',
+                ft.Text("45% loss limit reached.", color='#ff4444',
                         size=13, text_align=ft.TextAlign.CENTER),
                 ft.Container(height=6),
                 ft.Text(f"Initial bank:  ${self.banca_inicial:.2f}",
@@ -1172,7 +1445,7 @@ class LinupApp:
                 ft.Container(height=8),
                 ft.Text(
                     f"P/L:  ${profit:.2f}   ({pl_pct:.1f}%)",
-                    color='#e74c3c', size=20, weight=ft.FontWeight.BOLD,
+                    color='#ff4444', size=20, weight=ft.FontWeight.BOLD,
                 ),
                 ft.Container(height=10),
                 ft.Text(guardado_txt, color=guardado_color, size=13),
@@ -1183,7 +1456,7 @@ class LinupApp:
                 content=ft.Text("CLOSE TABLE", size=15, weight=ft.FontWeight.BOLD),
                 on_click=cerrar,
                 expand=True,
-                style=ft.ButtonStyle(bgcolor='#e74c3c', color=ft.Colors.WHITE),
+                style=ft.ButtonStyle(bgcolor='#ff4444', color=ft.Colors.WHITE),
             )
         ]
         dlg.actions_alignment = ft.MainAxisAlignment.CENTER
@@ -1199,13 +1472,13 @@ class LinupApp:
         profit   = round(self.banca_actual - self.banca_inicial, 2)
         pl_pct   = (profit / self.banca_inicial * 100) if self.banca_inicial != 0 else 0
         positivo = profit >= 0
-        color    = '#2ecc71' if positivo else '#e74c3c'
+        color    = '#2ecc71' if positivo else '#ff4444'
         signo    = "+" if positivo else ""
 
         ok, err_msg    = self._guardar_sesion()
         self._update_table_stats(profit >= 0)
         guardado_txt   = "Saved to history" if ok else f"Error: {err_msg}"
-        guardado_color = '#2ecc71' if ok else '#e74c3c'
+        guardado_color = '#2ecc71' if ok else '#ff4444'
 
         dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
 
@@ -1263,7 +1536,7 @@ class LinupApp:
             init_pl = self.inv_other_pl + (self.banca_actual - self.banca_inicial)
             self.lbl_inv_pl = ft.Text(
                 f"P/L: {init_pl:+.2f}",
-                color='#2ecc71' if init_pl >= 0 else '#e74c3c',
+                color='#2ecc71' if init_pl >= 0 else '#ff4444',
                 weight=ft.FontWeight.BOLD, size=16,
                 text_align=ft.TextAlign.RIGHT,
             )
@@ -1314,17 +1587,20 @@ class LinupApp:
             spacing=2,
         )
         sug_bar = ft.Container(
-            bgcolor='#2c3e50', padding=4, height=44,
+            bgcolor='#2c3e50', padding=4, height=50,
             content=self.sug_row,
         )
 
         self.mixer_btns = {}
-        cats = [
-            (['34', '35', '36'], C_COL),
-            (['1a', '2a', '3a'], C_DOC),
-            (['Z0', 'ZG', 'ZP', 'H'], C_SEC),
-            (['T1', 'T2', 'T3'], C_SET),
+        vc = self.visible_cats
+        all_cats = [
+            ('cols',   ['34', '35', '36'],      C_COL),
+            ('docs',   ['1a', '2a', '3a'],      C_DOC),
+            ('secs',   ['Z0', 'ZG', 'ZP', 'H'], C_SEC),
+            ('thirds', ['T1', 'T2', 'T3'],      C_SET),
+            ('wave',   ['W1', 'W2', 'W3'],      C_WAV),
         ]
+        cats = [(grps, col) for key, grps, col in all_cats if vc.get(key, True)]
         mixer_rows = []
         for grps, col in cats:
             row_btns = []
@@ -1369,7 +1645,7 @@ class LinupApp:
             content=self._txt("FINISH"),
             on_click=self.finalizar_sesion,
             expand=1, height=45,
-            style=ft.ButtonStyle(bgcolor='#e74c3c', color=ft.Colors.WHITE,
+            style=ft.ButtonStyle(bgcolor='#ff4444', color=ft.Colors.WHITE,
                                  animation_duration=400),
         )
         ctrl_bar = ft.Container(
@@ -1459,16 +1735,27 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     # LOG TABLE
     # ──────────────────────────────────────────────────────────────────
+    def _table_specs(self):
+        """Return list of (header, color) pairs based on visible_cats."""
+        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave']})
+        W  = ft.Colors.WHITE
+        specs = [("N", '#f1c40f')]
+        if vc.get('basic',  True): specs += [("R",'#ff4d4d'),("N",W),("P",'#3498db'),("I",'#f39c12'),("B",W),("A",W)]
+        if vc.get('cols',   True): specs += [("34",C_COL),("35",C_COL),("36",C_COL)]
+        if vc.get('docs',   True): specs += [("1a",C_DOC),("2a",C_DOC),("3a",C_DOC)]
+        if vc.get('secs',   True): specs += [("Z0",C_SEC),("ZG",C_SEC),("ZP",C_SEC),("H",C_SEC)]
+        if vc.get('thirds', True): specs += [("T1",C_SET),("T2",C_SET),("T3",C_SET)]
+        if vc.get('wave',   True): specs += [("W1",C_WAV),("W2",C_WAV),("W3",C_WAV)]
+        return specs
+
     def _rebuild_table_header(self):
-        cw = self._col_width()
-        h_list = ["N","R","N","P","I","B","A",
-                  "34","35","36","1a","2a","3a",
-                  "Z0","ZG","ZP","H","T1","T2","T3"]
+        cw    = self._col_width()
+        specs = self._table_specs()
         self.reg_header_row.controls = [
-            ft.Text(h, width=cw, color='#7f8c8d',
+            ft.Text(h, width=cw, color=c,
                     text_align=ft.TextAlign.CENTER,
                     size=7, weight=ft.FontWeight.BOLD)
-            for h in h_list
+            for h, c in specs
         ]
 
     def update_registration_table(self):
@@ -1477,30 +1764,29 @@ class LinupApp:
         cw = self._col_width()
         self._rebuild_table_header()
         self.reg_rows_box.controls.clear()
-        s = "■"
+        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave']})
+        s  = "■"
+        W  = ft.Colors.WHITE
         for n in self.history_nums[-8:]:
-            cells = [
-                (str(n),                                      '#f1c40f'),
-                (s if n in ROJOS else "",                     '#ff4d4d'),
-                (s if (n!=0 and n not in ROJOS) else "",      ft.Colors.WHITE),
-                (s if (n!=0 and n%2==0) else "",              '#3498db'),
-                (s if (n%2!=0) else "",                       '#f39c12'),
-                (s if (1<=n<=18) else "",                     ft.Colors.WHITE),
-                (s if (19<=n<=36) else "",                    ft.Colors.WHITE),
-                (s if n in GRUPOS_MAESTROS['34'] else "",     C_COL),
-                (s if n in GRUPOS_MAESTROS['35'] else "",     C_COL),
-                (s if n in GRUPOS_MAESTROS['36'] else "",     C_COL),
-                (s if n in GRUPOS_MAESTROS['1a'] else "",     C_DOC),
-                (s if n in GRUPOS_MAESTROS['2a'] else "",     C_DOC),
-                (s if n in GRUPOS_MAESTROS['3a'] else "",     C_DOC),
-                (s if n in GRUPOS_MAESTROS['Z0'] else "",     C_SEC),
-                (s if n in GRUPOS_MAESTROS['ZG'] else "",     C_SEC),
-                (s if n in GRUPOS_MAESTROS['ZP'] else "",     C_SEC),
-                (s if n in GRUPOS_MAESTROS['H']  else "",     C_SEC),
-                (s if n in GRUPOS_MAESTROS['T1'] else "",     C_SET),
-                (s if n in GRUPOS_MAESTROS['T2'] else "",     C_SET),
-                (s if n in GRUPOS_MAESTROS['T3'] else "",     C_SET),
-            ]
+            cells = [(str(n), '#f1c40f')]
+            if vc.get('basic', True):
+                cells += [
+                    (s if n in ROJOS else "",                '#ff4d4d'),
+                    (s if (n != 0 and n not in ROJOS) else "", W),
+                    (s if (n != 0 and n % 2 == 0) else "",  '#3498db'),
+                    (s if (n % 2 != 0) else "",              '#f39c12'),
+                    (s if (1 <= n <= 18) else "",            W),
+                    (s if (19 <= n <= 36) else "",           W),
+                ]
+            for key, grps, col in [
+                ('cols',   ['34','35','36'],       C_COL),
+                ('docs',   ['1a','2a','3a'],        C_DOC),
+                ('secs',   ['Z0','ZG','ZP','H'],   C_SEC),
+                ('thirds', ['T1','T2','T3'],        C_SET),
+                ('wave',   ['W1','W2','W3'],        C_WAV),
+            ]:
+                if vc.get(key, True):
+                    cells += [(s if n in GRUPOS_MAESTROS[g] else "", col) for g in grps]
             self.reg_rows_box.controls.append(
                 ft.Row(
                     controls=[
@@ -1540,7 +1826,7 @@ class LinupApp:
     # GAME LOGIC
     # ──────────────────────────────────────────────────────────────────
 
-    GRUPOS_STRAIGHT = {'Z0', 'ZG', 'ZP', 'H', 'T1', 'T2', 'T3'}
+    GRUPOS_STRAIGHT = {'Z0', 'ZG', 'ZP', 'H', 'T1', 'T2', 'T3', 'W1', 'W2', 'W3'}
     PROG_2_OUT = [2, 6, 18, 54]          # 2 lines/dozens: 1,3,9,27 per line (4 attempts)
     PROG_2_IN  = [1, 3, 5, 9, 17]        # 2 sectors/zones progression
 
@@ -1633,7 +1919,7 @@ class LinupApp:
             self.actualizar_sugerencias()
         except Exception as _err:
             import traceback
-            with open("/tmp/linup_error.log", "a") as _f:
+            with open(os.path.join(tempfile.gettempdir(), "linup_error.log"), "a") as _f:
                 _f.write(f"[process_number] {type(_err).__name__}: {_err}\n")
                 traceback.print_exc(file=_f)
 
@@ -1661,11 +1947,15 @@ class LinupApp:
             btn.update()
 
     def seleccionar_mixer(self, e):
+        SECTORS = {'Z0', 'ZG', 'ZP', 'H'}
         g = e.control.data['name']
         if g in self.grupos_activos:
             self.grupos_activos.remove(g)
-        elif len(self.grupos_activos) < 2:
-            self.grupos_activos.append(g)
+        else:
+            all_sectors = all(x in SECTORS for x in self.grupos_activos) and g in SECTORS
+            limit = 3 if all_sectors else 2
+            if len(self.grupos_activos) < limit:
+                self.grupos_activos.append(g)
         self._refresh_mixer_colors()
         self.update_inv_label()
         self.lbl_inv.update()
@@ -1686,7 +1976,9 @@ class LinupApp:
 
         # Color: use first group's color, or blended label if two
         def grp_color(g):
-            return C_SEC if g in {'Z0', 'ZG', 'ZP', 'H'} else C_SET
+            if g in {'Z0', 'ZG', 'ZP', 'H'}: return C_SEC
+            if g in {'W1', 'W2', 'W3'}:       return C_WAV
+            return C_SET
         title_chips = [
             ft.Container(
                 bgcolor=grp_color(g), border_radius=5,
@@ -1819,6 +2111,7 @@ class LinupApp:
         self.btn_inv.update()
         self.update_inv_label()
         self.lbl_inv.update()
+        self.update_ui()   # immediately reflect pending bet in P/L
 
     def _check_pre_bet_warning(self, on_confirm):
         """Show warning if losing this bet would breach 45% stop loss."""
@@ -1855,10 +2148,10 @@ class LinupApp:
                 ft.Divider(color='#444444'),
                 ft.Text("If you lose this bet:", color=ft.Colors.WHITE, size=13),
                 ft.Container(height=4),
-                ft.Text(f"Bank: ${potential_bank:.2f}", color='#e74c3c',
+                ft.Text(f"Bank: ${potential_bank:.2f}", color='#ff4444',
                         size=18, weight=ft.FontWeight.BOLD),
                 ft.Text(f"Loss: {loss_pct*100:.1f}%  (limit 45%)",
-                        color='#e74c3c', size=13),
+                        color='#ff4444', size=13),
             ],
         )
         dlg.actions = [
@@ -1910,27 +2203,44 @@ class LinupApp:
         return handler
 
     def actualizar_sugerencias(self):
-        cats = [
-            (['34', '35', '36'], C_COL),
-            (['1a', '2a', '3a'], C_DOC),
-            (['Z0', 'ZG', 'ZP', 'H'], C_SEC),
-            (['T1', 'T2', 'T3'], C_SET),
+        vc = getattr(self, 'visible_cats', {k: True for k in ['cols','docs','secs','thirds','wave']})
+        all_cats = [
+            ('cols',   ['34', '35', '36'],       C_COL),
+            ('docs',   ['1a', '2a', '3a'],        C_DOC),
+            ('secs',   ['Z0', 'ZG', 'ZP', 'H'],  C_SEC),
+            ('thirds', ['T1', 'T2', 'T3'],        C_SET),
+            ('wave',   ['W1', 'W2', 'W3'],        C_WAV),
         ]
+        cats = [(grps, col) for key, grps, col in all_cats if vc.get(key, True)]
+        n_cats = max(len(cats), 1)
 
         if len(self.sliding_window) < 6:
-            faltan = 6 - len(self.sliding_window)
             self.sug_row.controls = [
                 ft.ElevatedButton(
-                    content=self._txt(f"({faltan} more)", size=12),
-                    expand=True, height=35,
-                    style=ft.ButtonStyle(bgcolor='#34495e', color=ft.Colors.WHITE),
+                    content=self._txt("×", size=16),
+                    expand=True, height=40,
+                    style=ft.ButtonStyle(bgcolor='#34495e', color='#7f8c8d'),
                 )
-                for _ in range(4)
+                for _ in range(n_cats)
             ]
             self.sug_row.update()
             return
 
+        def _sug_content(label):
+            if '+' in label:
+                a, b = label.split('+', 1)
+                return ft.Column(
+                    [ft.Text(a, size=11, weight=ft.FontWeight.BOLD,
+                             color=ft.Colors.WHITE, text_align=ft.TextAlign.CENTER),
+                     ft.Text(b, size=11, weight=ft.FontWeight.BOLD,
+                             color=ft.Colors.WHITE, text_align=ft.TextAlign.CENTER)],
+                    spacing=0, tight=True,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            return self._txt(label, size=12)
+
         new_btns = []
+        PAIR_BLOQUEADO = {'ZG', 'ZP'}
         for grupos, color in cats:
             stats = sorted(
                 [{'g': g,
@@ -1939,11 +2249,10 @@ class LinupApp:
                  for g in grupos],
                 key=lambda x: x['p'], reverse=True,
             )
-            PAIR_BLOQUEADO = {'ZG', 'ZP'}
             g_par_candidato = {stats[0]['g'], stats[1]['g']}
             es_par_bloqueado = g_par_candidato == PAIR_BLOQUEADO
 
-            if stats[1]['p'] > stats[2]['p'] and not es_par_bloqueado:
+            if stats[1]['p'] > stats[2 if len(stats) > 2 else 1]['p'] and not es_par_bloqueado:
                 g_par = [stats[0]['g'], stats[1]['g']]
                 label = f"{g_par[0]}+{g_par[1]}"
                 bg    = color
@@ -1955,8 +2264,8 @@ class LinupApp:
 
             new_btns.append(
                 ft.ElevatedButton(
-                    content=self._txt(label, size=12),
-                    expand=True, height=35,
+                    content=_sug_content(label),
+                    expand=True, height=40,
                     on_click=click,
                     style=ft.ButtonStyle(bgcolor=bg, color=ft.Colors.WHITE),
                 )
@@ -2003,16 +2312,20 @@ class LinupApp:
     def update_ui(self):
         if not self.lbl_bank:
             return
-        pl     = self.banca_actual - self.banca_inicial
+        pl = self.banca_actual - self.banca_inicial
+        # When a bet is active, immediately reflect the pending cost in P/L display
+        if self.activa:
+            pending_cost, _ = self._compute_bet()
+            pl -= pending_cost
         pl_pct = (pl / self.banca_inicial * 100) if self.banca_inicial != 0 else 0
         self.lbl_bank.value = f"{self.nombre_mesa}  |  ${self.banca_actual:.2f}"
         self.lbl_pl.value   = f"P/L: {pl_pct:+.1f}%"
-        self.lbl_pl.color   = '#2ecc71' if pl >= 0 else '#e74c3c'
+        self.lbl_pl.color   = '#2ecc71' if pl >= 0 else '#ff4444'
         self.update_inv_label()
         if self.lbl_inv_pl:
             total_pl = self.inv_other_pl + pl
             self.lbl_inv_pl.value = f"P/L: {total_pl:+.2f}"
-            self.lbl_inv_pl.color = '#2ecc71' if total_pl >= 0 else '#e74c3c'
+            self.lbl_inv_pl.color = '#2ecc71' if total_pl >= 0 else '#ff4444'
         self.page.update()
         self._check_stop_loss()
 
