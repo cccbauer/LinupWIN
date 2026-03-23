@@ -4,9 +4,9 @@ import sqlite3
 import os
 import math
 import random
-import tempfile
 from datetime import datetime
 import asyncio
+import tempfile
 
 # --- GROUP CONFIGURATION ---
 ROJOS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
@@ -33,6 +33,58 @@ GRUPOS_MAESTROS = {
 PROG_FIBO = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55]
 C_COL, C_DOC, C_SEC, C_SET, C_WAV = '#00d2ff', '#2ecc71', '#e67e22', '#9b59b6', '#e91e63'
 NUM_COLS = 20
+
+# ── Wheel neighbours (European single-zero wheel order) ──────────────
+WHEEL_ORDER = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26]
+WHEEL_NEIGHBORS = {
+    n: {WHEEL_ORDER[(i - 1) % 37], WHEEL_ORDER[(i + 1) % 37]}
+    for i, n in enumerate(WHEEL_ORDER)
+}
+# Live dozen groups: each dozen + direct wheel neighbours of every member
+def _live_grp(base):
+    return base | set().union(*(WHEEL_NEIGHBORS[n] for n in base))
+
+LIVE_FILTER_SETS = {
+    'R':     ROJOS,
+    'B':     set(range(1, 37)) - ROJOS,
+    '1-18':  set(range(1, 19)),
+    'Even':  {n for n in range(2, 37, 2)},
+    'Odd':   {n for n in range(1, 37, 2)},
+    '19-36': set(range(19, 37)),
+}
+# Suffix maps for building group keys from filter
+_DOC_SFX = {None: '_L', 'R': '_LR', 'B': '_LB',
+            '1-18': '_L18', 'Even': '_LE', 'Odd': '_LO', '19-36': '_L36'}
+_COL_SFX = {None: '', 'R': '_R', 'B': '_B',
+            '1-18': '_18', 'Even': '_E', 'Odd': '_O', '19-36': '_36'}
+
+for _d in ('1a', '2a', '3a'):
+    GRUPOS_MAESTROS[f'{_d}_L']   = _live_grp(GRUPOS_MAESTROS[_d])
+    GRUPOS_MAESTROS[f'{_d}_LR']  = GRUPOS_MAESTROS[f'{_d}_L'] & ROJOS
+    GRUPOS_MAESTROS[f'{_d}_LB']  = GRUPOS_MAESTROS[f'{_d}_L'] - ROJOS - {0}
+    GRUPOS_MAESTROS[f'{_d}_L18'] = GRUPOS_MAESTROS[f'{_d}_L'] & LIVE_FILTER_SETS['1-18']
+    GRUPOS_MAESTROS[f'{_d}_LE']  = GRUPOS_MAESTROS[f'{_d}_L'] & LIVE_FILTER_SETS['Even']
+    GRUPOS_MAESTROS[f'{_d}_LO']  = GRUPOS_MAESTROS[f'{_d}_L'] & LIVE_FILTER_SETS['Odd']
+    GRUPOS_MAESTROS[f'{_d}_L36'] = GRUPOS_MAESTROS[f'{_d}_L'] & LIVE_FILTER_SETS['19-36']
+# 0 is a wheel neighbour of 3a numbers (26, 32) → include it in every 3a filtered group
+for _sfx in ('_LR', '_LB', '_L18', '_LE', '_LO', '_L36'):
+    GRUPOS_MAESTROS[f'3a{_sfx}'] |= {0}
+for _c in ('34', '35', '36'):
+    GRUPOS_MAESTROS[f'{_c}_R']  = GRUPOS_MAESTROS[_c] & ROJOS
+    GRUPOS_MAESTROS[f'{_c}_B']  = GRUPOS_MAESTROS[_c] - ROJOS - {0}
+    GRUPOS_MAESTROS[f'{_c}_18'] = GRUPOS_MAESTROS[_c] & LIVE_FILTER_SETS['1-18']
+    GRUPOS_MAESTROS[f'{_c}_E']  = GRUPOS_MAESTROS[_c] & LIVE_FILTER_SETS['Even']
+    GRUPOS_MAESTROS[f'{_c}_O']  = GRUPOS_MAESTROS[_c] & LIVE_FILTER_SETS['Odd']
+    GRUPOS_MAESTROS[f'{_c}_36'] = GRUPOS_MAESTROS[_c] & LIVE_FILTER_SETS['19-36']
+# All live / filtered groups are inside bets (one chip per number)
+GRUPOS_LIVE_INSIDE: set = set()
+for _d in ('1a', '2a', '3a'):
+    for _sfx in _DOC_SFX.values():
+        GRUPOS_LIVE_INSIDE.add(f'{_d}{_sfx}')
+for _c in ('34', '35', '36'):
+    for _sfx in _COL_SFX.values():
+        if _sfx:   # empty suffix = standard column (stays as outside)
+            GRUPOS_LIVE_INSIDE.add(f'{_c}{_sfx}')
 
 
 class LinupApp:
@@ -264,6 +316,8 @@ class LinupApp:
         self.stop_loss_triggered  = False
         self.activa               = False
         self.free_spin_mode       = False
+        self.live_table_mode      = False
+        self.live_filter       = None   # None, 'R', 'B'
         self.grupos_activos       = []
         self.history_nums         = []
         self.sliding_window       = deque(maxlen=6)
@@ -1302,6 +1356,33 @@ class LinupApp:
         )
         _fs_ref[0] = free_spin_btn
 
+        self.live_table_mode = False
+        _lt_lbl = ft.Text("LIVE TABLE: OFF", color=ft.Colors.WHITE,
+                          weight=ft.FontWeight.BOLD)
+        _lt_ref = [None]
+
+        def _toggle_live_table(e):
+            self.live_table_mode = not self.live_table_mode
+            on = self.live_table_mode
+            _lt_lbl.value    = "LIVE TABLE: ON" if on else "LIVE TABLE: OFF"
+            _lt_ref[0].style = ft.ButtonStyle(
+                bgcolor='#3498db' if on else '#555555',
+                color=ft.Colors.WHITE,
+            )
+            if on and hasattr(self, 'cb_basic'):
+                self.cb_basic.value = True
+                self.cb_basic.update()
+            _lt_lbl.update()
+            _lt_ref[0].update()
+
+        live_table_btn = ft.ElevatedButton(
+            content=_lt_lbl,
+            height=50, expand=True,
+            style=ft.ButtonStyle(bgcolor='#555555', color=ft.Colors.WHITE),
+            on_click=_toggle_live_table,
+        )
+        _lt_ref[0] = live_table_btn
+
         vc = self.visible_cats
         self.cb_basic  = ft.Checkbox(label="Basic  (R N P I B A)", value=vc['basic'],
                                      fill_color='#555555', check_color=ft.Colors.WHITE,
@@ -1348,6 +1429,8 @@ class LinupApp:
                         self.fout_input,
                         ft.Container(height=10),
                         free_spin_btn,
+                        ft.Container(height=6),
+                        live_table_btn,
                         ft.Container(height=10),
                         ft.Text("TABLE COLUMNS:", color='#7f8c8d', size=12,
                                 weight=ft.FontWeight.BOLD),
@@ -1591,6 +1674,75 @@ class LinupApp:
             content=self.sug_row,
         )
 
+        # ── Live Table filter panel (only when live_table_mode is ON) ──────
+        self.live_filter = None
+        rb_bar = None
+        if self.live_table_mode:
+            _INACTIVE = '#3a3a3a'
+            _ACTIVE_COLOR = {
+                'R': '#c0392b', 'B': '#222222',
+                '1-18': '#555577', 'Even': '#446644',
+                'Odd': '#664444', '19-36': '#445566',
+            }
+            # All buttons stored as (opt, btn) pairs so R/B can appear in both rows
+            _all_filter_btns: list = []   # list of (opt, btn)
+
+            def _apply_filter(new_f):
+                self.live_filter = new_f
+                # Re-map any already-selected live groups to the new filter variant
+                updated = []
+                for g in self.grupos_activos:
+                    base = self._to_display_name(g)
+                    if base in ('1a', '2a', '3a'):
+                        updated.append(f'{base}{_DOC_SFX.get(new_f, "_L")}')
+                    elif base in ('34', '35', '36'):
+                        sfx = _COL_SFX.get(new_f, '')
+                        updated.append(f'{base}{sfx}' if sfx else base)
+                    else:
+                        updated.append(g)
+                self.grupos_activos = updated
+                for opt, btn in _all_filter_btns:
+                    btn.style = ft.ButtonStyle(
+                        bgcolor=_ACTIVE_COLOR[opt] if opt == new_f else _INACTIVE,
+                        color=ft.Colors.WHITE,
+                    )
+                    btn.update()
+                self._refresh_mixer_colors()
+                self.update_inv_label()
+                if self.lbl_inv:
+                    self.lbl_inv.update()
+                self.actualizar_sugerencias()
+
+            def _filter_btn(opt, label, height=34, size=11):
+                def _click(e, o=opt):
+                    _apply_filter(None if self.live_filter == o else o)
+                btn = ft.ElevatedButton(
+                    content=self._txt(label, size=size),
+                    expand=True, height=height,
+                    style=ft.ButtonStyle(bgcolor=_INACTIVE, color=ft.Colors.WHITE),
+                    on_click=_click,
+                )
+                _all_filter_btns.append((opt, btn))
+                return btn
+
+            row1 = ft.Row(controls=[
+                _filter_btn('R', '■  RED',   height=38, size=12),
+                _filter_btn('B', '■  BLACK', height=38, size=12),
+            ], spacing=4)
+            row2 = ft.Row(controls=[
+                _filter_btn('1-18',  '1-18',  height=28, size=9),
+                _filter_btn('Even',  'Even',  height=28, size=9),
+                _filter_btn('R',     'RED',   height=28, size=9),
+                _filter_btn('B',     'BLACK', height=28, size=9),
+                _filter_btn('Odd',   'Odd',   height=28, size=9),
+                _filter_btn('19-36', '19-36', height=28, size=9),
+            ], spacing=2, tight=True)
+            rb_bar = ft.Container(
+                bgcolor='#1a2a3a',
+                padding=ft.padding.symmetric(horizontal=6, vertical=4),
+                content=ft.Column(controls=[row1, row2], spacing=3),
+            )
+
         self.mixer_btns = {}
         vc = self.visible_cats
         all_cats = [
@@ -1719,6 +1871,7 @@ class LinupApp:
                     expand=True, spacing=0,
                     controls=inv_bar_controls + [
                         stats_bar, sug_bar,
+                    ] + ([rb_bar] if rb_bar else []) + [
                         mixer_box, ctrl_bar,
                         ft.Container(
                             expand=True,
@@ -1778,6 +1931,7 @@ class LinupApp:
                     (s if (1 <= n <= 18) else "",            W),
                     (s if (19 <= n <= 36) else "",           W),
                 ]
+            live = getattr(self, 'live_table_mode', False)
             for key, grps, col in [
                 ('cols',   ['34','35','36'],       C_COL),
                 ('docs',   ['1a','2a','3a'],        C_DOC),
@@ -1786,7 +1940,11 @@ class LinupApp:
                 ('wave',   ['W1','W2','W3'],        C_WAV),
             ]:
                 if vc.get(key, True):
-                    cells += [(s if n in GRUPOS_MAESTROS[g] else "", col) for g in grps]
+                    if live and key == 'docs':
+                        # In live mode show ■ in every dozen whose live set contains n
+                        cells += [(s if n in GRUPOS_MAESTROS[f'{g}_L'] else "", col) for g in grps]
+                    else:
+                        cells += [(s if n in GRUPOS_MAESTROS[g] else "", col) for g in grps]
             self.reg_rows_box.controls.append(
                 ft.Row(
                     controls=[
@@ -1831,10 +1989,11 @@ class LinupApp:
     PROG_2_IN  = [1, 3, 5, 9, 17]        # 2 sectors/zones progression
 
     def _is_outside(self):
-        return all(g not in self.GRUPOS_STRAIGHT for g in self.grupos_activos)
+        return all(g not in self.GRUPOS_STRAIGHT and g not in GRUPOS_LIVE_INSIDE
+                   for g in self.grupos_activos)
 
     def _group_cost(self, g):
-        if g in self.GRUPOS_STRAIGHT:
+        if g in self.GRUPOS_STRAIGHT or g in GRUPOS_LIVE_INSIDE:
             return self.val_fin * len(GRUPOS_MAESTROS[g])
         return self.val_fout
 
@@ -1923,11 +2082,20 @@ class LinupApp:
                 _f.write(f"[process_number] {type(_err).__name__}: {_err}\n")
                 traceback.print_exc(file=_f)
 
+    @staticmethod
+    def _to_display_name(g):
+        """Strip live/filter suffixes to get the mixer button key."""
+        for sfx in ('_LR', '_LB', '_L', '_R', '_B'):
+            if g.endswith(sfx):
+                return g[:-len(sfx)]
+        return g
+
     def _refresh_mixer_colors(self):
         has_sel = bool(self.grupos_activos)
+        active_display = {self._to_display_name(g) for g in self.grupos_activos}
         for g, btn in self.mixer_btns.items():
             base_color = btn.data['color']
-            if g in self.grupos_activos:
+            if g in active_display:
                 btn.style = ft.ButtonStyle(
                     bgcolor=base_color, color='#f1c40f',
                     animation_duration=400,
@@ -1949,13 +2117,23 @@ class LinupApp:
     def seleccionar_mixer(self, e):
         SECTORS = {'Z0', 'ZG', 'ZP', 'H'}
         g = e.control.data['name']
-        if g in self.grupos_activos:
-            self.grupos_activos.remove(g)
+        # In Live Table mode, map dozens/columns to their live/filtered variants
+        actual_g = g
+        if self.live_table_mode:
+            f = self.live_filter
+            if g in ('1a', '2a', '3a'):
+                actual_g = f'{g}{_DOC_SFX.get(f, "_L")}'
+            elif g in ('34', '35', '36') and f:
+                actual_g = f'{g}{_COL_SFX.get(f, "")}'
+        # Toggle: check by display name to handle live variants
+        if g in {self._to_display_name(x) for x in self.grupos_activos}:
+            self.grupos_activos = [x for x in self.grupos_activos
+                                   if self._to_display_name(x) != g]
         else:
             all_sectors = all(x in SECTORS for x in self.grupos_activos) and g in SECTORS
             limit = 3 if all_sectors else 2
             if len(self.grupos_activos) < limit:
-                self.grupos_activos.append(g)
+                self.grupos_activos.append(actual_g)
         self._refresh_mixer_colors()
         self.update_inv_label()
         self.lbl_inv.update()
@@ -1968,22 +2146,36 @@ class LinupApp:
         chip_per_num = self.val_fin * multi
         total_cost, _ = self._compute_bet()   # exact amount that will hit the bank
 
-        # Merge all nums from active straight groups
-        straight_groups = [g for g in self.grupos_activos if g in self.GRUPOS_STRAIGHT]
+        # Merge all nums from active straight groups (including live inside groups)
+        straight_groups = [g for g in self.grupos_activos
+                           if g in self.GRUPOS_STRAIGHT or g in GRUPOS_LIVE_INSIDE]
         all_nums: set = set()
         for g in straight_groups:
             all_nums |= GRUPOS_MAESTROS[g]
 
         # Color: use first group's color, or blended label if two
         def grp_color(g):
-            if g in {'Z0', 'ZG', 'ZP', 'H'}: return C_SEC
-            if g in {'W1', 'W2', 'W3'}:       return C_WAV
+            if g in {'Z0', 'ZG', 'ZP', 'H'}:                   return C_SEC
+            if g in {'W1', 'W2', 'W3'}:                         return C_WAV
+            if self._to_display_name(g) in ('1a', '2a', '3a'):  return C_DOC
+            if self._to_display_name(g) in ('34', '35', '36'):  return C_COL
             return C_SET
+
+        def grp_label(g):
+            """Human-readable label for chip popup header."""
+            for sfx, tag in [('_LR','·R'),('_LB','·B'),('_L18','·1-18'),
+                              ('_LE','·Even'),('_LO','·Odd'),('_L36','·19-36'),
+                              ('_L',''), ('_R','·R'),('_B','·B'),('_18','·1-18'),
+                              ('_E','·Even'),('_O','·Odd'),('_36','·19-36')]:
+                if g.endswith(sfx):
+                    return self._to_display_name(g) + tag
+            return g
+
         title_chips = [
             ft.Container(
                 bgcolor=grp_color(g), border_radius=5,
                 padding=ft.padding.symmetric(horizontal=8, vertical=2),
-                content=ft.Text(g, color=ft.Colors.WHITE, size=14,
+                content=ft.Text(grp_label(g), color=ft.Colors.WHITE, size=14,
                                 weight=ft.FontWeight.BOLD),
             )
             for g in straight_groups
@@ -2172,7 +2364,8 @@ class LinupApp:
         self.page.update()
 
     def _has_straight(self):
-        return any(g in self.GRUPOS_STRAIGHT for g in self.grupos_activos)
+        return any(g in self.GRUPOS_STRAIGHT or g in GRUPOS_LIVE_INSIDE
+                   for g in self.grupos_activos)
 
     def _proceed_bet(self):
         self._check_pre_bet_warning(self._activate_bet)
@@ -2199,7 +2392,16 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     def _make_sug_handler(self, g_par):
         def handler(ev):
-            self.auto_invertir_sug(g_par)
+            if getattr(self, 'live_table_mode', False):
+                # Live mode: just select the group — user presses INVEST to confirm
+                self.limpiar_seleccion_visual()
+                self.grupos_activos = list(g_par)
+                self._refresh_mixer_colors()
+                self.update_inv_label()
+                if self.lbl_inv:
+                    self.lbl_inv.update()
+            else:
+                self.auto_invertir_sug(g_par)
         return handler
 
     def actualizar_sugerencias(self):
@@ -2211,7 +2413,7 @@ class LinupApp:
             ('thirds', ['T1', 'T2', 'T3'],        C_SET),
             ('wave',   ['W1', 'W2', 'W3'],        C_WAV),
         ]
-        cats = [(grps, col) for key, grps, col in all_cats if vc.get(key, True)]
+        cats = [(key, grps, col) for key, grps, col in all_cats if vc.get(key, True)]
         n_cats = max(len(cats), 1)
 
         if len(self.sliding_window) < 6:
@@ -2239,16 +2441,69 @@ class LinupApp:
                 )
             return self._txt(label, size=12)
 
+        live = getattr(self, 'live_table_mode', False)
+        lf   = getattr(self, 'live_filter', None)   # e.g. None, 'R', 'B', '1-18', …
+
+        _FILTER_LABELS = {
+            'R': 'R', 'B': 'B', '1-18': '1-18',
+            'Even': 'Ev', 'Odd': 'Od', '19-36': '19-36',
+        }
+
         new_btns = []
         PAIR_BLOQUEADO = {'ZG', 'ZP'}
-        for grupos, color in cats:
+        for key, grupos, color in cats:
+            # In live mode, dozens frequency is measured against expanded live sets
             stats = sorted(
                 [{'g': g,
                   'p': sum(1 for n in self.sliding_window
-                           if n in GRUPOS_MAESTROS[g]) / 6}
+                           if n in GRUPOS_MAESTROS[f'{g}_L' if (live and key == 'docs') else g]) / 6}
                  for g in grupos],
                 key=lambda x: x['p'], reverse=True,
             )
+
+            if live and key == 'docs':
+                # Single most-frequent dozen using live (wheel-expanded) group + active filter
+                top      = stats[0]['g']
+                actual_g = f'{top}{_DOC_SFX.get(lf, "_L")}'
+                ftag     = _FILTER_LABELS[lf] if lf else ''
+                label    = f'{top}+{ftag}' if ftag else top
+                bg       = color if stats[0]['p'] > 0 else '#34495e'
+                click    = self._make_sug_handler([actual_g])
+                new_btns.append(
+                    ft.ElevatedButton(
+                        content=_sug_content(label),
+                        expand=True, height=40,
+                        on_click=click,
+                        style=ft.ButtonStyle(bgcolor=bg, color=ft.Colors.WHITE),
+                    )
+                )
+                continue
+
+            if live and key == 'cols' and lf:
+                # Column pair with active filter applied
+                if stats[1]['p'] > stats[2 if len(stats) > 2 else 1]['p']:
+                    g_par  = [stats[0]['g'], stats[1]['g']]
+                    col_sfx = _COL_SFX.get(lf, '')
+                    actual  = [f'{g}{col_sfx}' if col_sfx else g for g in g_par]
+                    ftag    = _FILTER_LABELS[lf]
+                    label   = f'{g_par[0]}·{ftag}+{g_par[1]}·{ftag}'
+                    bg      = color
+                    click   = self._make_sug_handler(actual)
+                else:
+                    label = "---"
+                    bg    = '#34495e'
+                    click = None
+                new_btns.append(
+                    ft.ElevatedButton(
+                        content=_sug_content(label),
+                        expand=True, height=40,
+                        on_click=click,
+                        style=ft.ButtonStyle(bgcolor=bg, color=ft.Colors.WHITE),
+                    )
+                )
+                continue
+
+            # Standard suggestion logic (pair)
             g_par_candidato = {stats[0]['g'], stats[1]['g']}
             es_par_bloqueado = g_par_candidato == PAIR_BLOQUEADO
 
@@ -2313,12 +2568,14 @@ class LinupApp:
         if not self.lbl_bank:
             return
         pl = self.banca_actual - self.banca_inicial
-        # When a bet is active, immediately reflect the pending cost in P/L display
+        # When a bet is active, immediately reflect the pending cost in bank + P/L
+        displayed_bank = self.banca_actual
         if self.activa:
             pending_cost, _ = self._compute_bet()
             pl -= pending_cost
+            displayed_bank -= pending_cost
         pl_pct = (pl / self.banca_inicial * 100) if self.banca_inicial != 0 else 0
-        self.lbl_bank.value = f"{self.nombre_mesa}  |  ${self.banca_actual:.2f}"
+        self.lbl_bank.value = f"{self.nombre_mesa}  |  ${displayed_bank:.2f}"
         self.lbl_pl.value   = f"P/L: {pl_pct:+.1f}%"
         self.lbl_pl.color   = '#2ecc71' if pl >= 0 else '#ff4444'
         self.update_inv_label()
@@ -2330,6 +2587,12 @@ class LinupApp:
         self._check_stop_loss()
 
     def corregir_ultimo(self, e=None):
+        # First press while bet is active: cancel the pending bet, restore display
+        if self.activa:
+            self.activa = False
+            self.limpiar_seleccion_visual()
+            self.update_ui()
+            return
         if self.history_nums:
             self.history_nums.pop()
             if self.sliding_window:
