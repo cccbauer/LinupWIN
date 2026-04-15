@@ -11,11 +11,16 @@ echo.
 :: ============================================================
 echo [1/6] Checking Python...
 
-:: Prefer the Windows Python Launcher (py.exe) - it is always real Python.
-:: Fall back to 'python', but verify it is not the Windows Store stub
-:: (the stub exits 0 on some systems but cannot actually run scripts).
+:: Flag passed by the self-restart below so we never loop.
+set POST_INSTALL=0
+if "%~1"=="--post-install" set POST_INSTALL=1
+
 set PYTHON_CMD=
 
+:: ── If we already installed Python this session, jump straight to path lookup ──
+if %POST_INSTALL%==1 goto :find_after_install
+
+:: ── Normal check: prefer py launcher, then python ────────────────────────────
 py --version >nul 2>&1
 if not errorlevel 1 (
     set PYTHON_CMD=py
@@ -32,11 +37,10 @@ if not errorlevel 1 (
     goto :python_ok
 )
 
-:: ── Python not found: download and install ────────────────────────────────
+:: ── Python not found: download and install ───────────────────────────────────
 echo Python not found. Downloading Python 3.12.10 installer...
 echo.
 
-:: -UseBasicParsing avoids the IE engine requirement on fresh Windows installs
 powershell -Command "Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe' -OutFile '%TEMP%\python_installer.exe' -UseBasicParsing" 2>nul
 if errorlevel 1 (
     echo ERROR: Could not download Python installer.
@@ -50,8 +54,6 @@ echo Installing Python silently - this may take a minute...
 echo ^(If prompted by Windows security, click Yes^)
 echo.
 
-:: 'start /wait' blocks until the installer exits, which is more reliable
-:: than running the .exe directly in some UAC configurations.
 start /wait "" "%TEMP%\python_installer.exe" /quiet InstallAllUsers=0 PrependPath=1 Include_test=0
 set INST_ERR=%errorlevel%
 del "%TEMP%\python_installer.exe" >nul 2>&1
@@ -62,15 +64,38 @@ if %INST_ERR% neq 0 (
     pause
     exit /b 1
 )
-
 echo Python installed successfully.
-echo Restarting setup so the new PATH is picked up...
 echo.
 
-:: Open a fresh cmd window which will inherit the updated PATH from the registry.
-:: The original window closes after launching the new one.
-start "" cmd /k ""%~f0""
-exit /b 0
+:: ── After install: try the known per-user install path first ─────────────────
+:: This avoids needing to wait for PATH to propagate to a new window.
+:find_after_install
+for %%P in (
+    "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    "%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
+    "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+) do (
+    if exist %%P (
+        set PYTHON_CMD=%%P
+        for /f "tokens=2" %%v in ('%%P --version 2^>^&1') do set PYTHON_VERSION=%%v
+        echo OK - Python !PYTHON_VERSION! at %%P
+        goto :python_ok
+    )
+)
+
+:: Couldn't find the exe at the expected path — do a one-time restart so a
+:: fresh cmd window inherits the updated PATH from the registry.
+if %POST_INSTALL%==0 (
+    echo PATH not updated yet. Opening a fresh window to continue setup...
+    start "" cmd /c ""%~f0" --post-install & pause"
+    exit /b 0
+)
+
+:: Still not found after restart — give up.
+echo ERROR: Python was installed but cannot be located.
+echo        Please restart your computer and run setup.bat again.
+pause
+exit /b 1
 
 :python_ok
 echo.
