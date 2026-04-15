@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ============================================================
-echo   LINUP v12.0  -  Windows Setup
+echo   LINUP v13.0  -  Windows Setup
 echo ============================================================
 echo.
 
@@ -10,45 +10,69 @@ echo.
 :: STEP 1 - Check / install Python
 :: ============================================================
 echo [1/6] Checking Python...
-python --version >nul 2>&1
-if errorlevel 1 (
-    echo Python not found. Downloading Python 3.12.10 installer...
-    echo.
-    powershell -Command "Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe' -OutFile '%TEMP%\python_installer.exe'" 2>nul
-    if errorlevel 1 (
-        echo ERROR: Could not download Python. Check your internet connection.
-        echo Download manually from: https://www.python.org/downloads/
-        pause
-        exit /b 1
-    )
-    echo Installing Python silently (this may take a minute)...
-    "%TEMP%\python_installer.exe" /quiet InstallAllUsers=0 PrependPath=1 Include_test=0
-    if errorlevel 1 (
-        echo ERROR: Python installation failed. Try running as Administrator.
-        del "%TEMP%\python_installer.exe" >nul 2>&1
-        pause
-        exit /b 1
-    )
-    del "%TEMP%\python_installer.exe" >nul 2>&1
 
-    :: Refresh PATH in this session so we don't need to reopen the window
-    for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v PATH 2^>nul') do set "USERPATH=%%B"
-    for /f "tokens=2*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "SYSPATH=%%B"
-    set "PATH=!SYSPATH!;!USERPATH!"
+:: Prefer the Windows Python Launcher (py.exe) - it is always real Python.
+:: Fall back to 'python', but verify it is not the Windows Store stub
+:: (the stub exits 0 on some systems but cannot actually run scripts).
+set PYTHON_CMD=
 
-    python --version >nul 2>&1
-    if errorlevel 1 (
-        echo.
-        echo Python was installed but this window cannot see it yet.
-        echo Please CLOSE this window and run setup.bat again.
-        pause
-        exit /b 0
-    )
-    echo OK - Python installed successfully.
-) else (
+py --version >nul 2>&1
+if not errorlevel 1 (
+    set PYTHON_CMD=py
+    for /f "tokens=2" %%v in ('py --version 2^>^&1') do set PYTHON_VERSION=%%v
+    echo OK - Python !PYTHON_VERSION! found ^(py launcher^).
+    goto :python_ok
+)
+
+python -c "import sys; sys.exit(0)" >nul 2>&1
+if not errorlevel 1 (
+    set PYTHON_CMD=python
     for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYTHON_VERSION=%%v
     echo OK - Python !PYTHON_VERSION! found.
+    goto :python_ok
 )
+
+:: ── Python not found: download and install ────────────────────────────────
+echo Python not found. Downloading Python 3.12.10 installer...
+echo.
+
+:: -UseBasicParsing avoids the IE engine requirement on fresh Windows installs
+powershell -Command "Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe' -OutFile '%TEMP%\python_installer.exe' -UseBasicParsing" 2>nul
+if errorlevel 1 (
+    echo ERROR: Could not download Python installer.
+    echo        Check your internet connection or download manually:
+    echo        https://www.python.org/downloads/
+    pause
+    exit /b 1
+)
+
+echo Installing Python silently - this may take a minute...
+echo ^(If prompted by Windows security, click Yes^)
+echo.
+
+:: 'start /wait' blocks until the installer exits, which is more reliable
+:: than running the .exe directly in some UAC configurations.
+start /wait "" "%TEMP%\python_installer.exe" /quiet InstallAllUsers=0 PrependPath=1 Include_test=0
+set INST_ERR=%errorlevel%
+del "%TEMP%\python_installer.exe" >nul 2>&1
+
+if %INST_ERR% neq 0 (
+    echo ERROR: Python installation failed ^(error %INST_ERR%^).
+    echo        Try right-clicking setup.bat and choosing "Run as administrator".
+    pause
+    exit /b 1
+)
+
+echo Python installed successfully.
+echo Restarting setup so the new PATH is picked up...
+echo.
+
+:: Open a fresh cmd window which will inherit the updated PATH from the registry.
+:: The original window closes after launching the new one.
+start "" cmd /k ""%~f0""
+exit /b 0
+
+:python_ok
 echo.
 
 :: ============================================================
@@ -58,7 +82,7 @@ echo [2/6] Setting up virtual environment...
 if exist venv (
     echo NOTE: venv already exists, reusing it.
 ) else (
-    python -m venv venv
+    !PYTHON_CMD! -m venv venv
     if errorlevel 1 (
         echo ERROR: Could not create virtual environment.
         pause
@@ -71,8 +95,14 @@ echo.
 :: ============================================================
 :: STEP 3 - Activate venv + upgrade pip
 :: ============================================================
-echo [3/6] Upgrading pip...
+echo [3/6] Activating venv and upgrading pip...
 call venv\Scripts\activate.bat
+if errorlevel 1 (
+    echo ERROR: Could not activate virtual environment.
+    echo        Delete the "venv" folder and run setup.bat again.
+    pause
+    exit /b 1
+)
 python -m pip install --upgrade pip --quiet
 if errorlevel 1 (
     echo ERROR: pip upgrade failed.
@@ -89,6 +119,7 @@ echo [4/6] Installing Flet...
 pip install "flet>=0.25.0" --quiet
 if errorlevel 1 (
     echo ERROR: Failed to install Flet.
+    echo        Check your internet connection and try again.
     pause
     exit /b 1
 )
@@ -102,8 +133,8 @@ echo.
 echo [5/6] Checking Flutter (optional)...
 flutter --version >nul 2>&1
 if errorlevel 1 (
-    echo NOTE: Flutter not found - only needed to build a standalone .exe.
-    echo       To install: https://docs.flutter.dev/get-started/install/windows
+    echo NOTE: Flutter not found - only needed if you want to build a standalone .exe.
+    echo       Install guide: https://docs.flutter.dev/get-started/install/windows
     set FLUTTER_OK=0
 ) else (
     for /f "tokens=2" %%v in ('flutter --version 2^>^&1 ^| findstr /i "Flutter"') do set FLUTTER_VERSION=%%v
@@ -116,19 +147,17 @@ echo.
 :: STEP 6 - Create run.bat + summary
 :: ============================================================
 echo [6/6] Finishing up...
-if not exist run.bat (
-    (
-        echo @echo off
-        echo call "%~dp0venv\Scripts\activate.bat"
-        echo flet run "%~dp0main.py"
-        echo pause
-    ) > run.bat
-    echo Created run.bat
-)
+(
+    echo @echo off
+    echo call "%~dp0venv\Scripts\activate.bat"
+    echo flet run "%~dp0main.py"
+    echo pause
+) > run.bat
+echo Created / updated run.bat
 echo.
 
 echo ============================================================
-echo   LINUP v12.0 - Setup complete!
+echo   LINUP v13.0 - Setup complete!
 echo ============================================================
 for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYTHON_VERSION=%%v
 echo   Python : !PYTHON_VERSION!
@@ -138,7 +167,7 @@ echo ============================================================
 echo.
 echo HOW TO LAUNCH LINUP:
 echo   - Double-click  run.bat        (easiest)
-echo   - Or open a terminal and type:
+echo   - Or open a terminal here and type:
 echo         venv\Scripts\activate
 echo         flet run main.py
 echo.
