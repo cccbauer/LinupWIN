@@ -345,7 +345,17 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     # NAVIGATION
     # ──────────────────────────────────────────────────────────────────
+    def _close_dlg(self, dlg: ft.AlertDialog):
+        """Close a dialog and remove it from the overlay to prevent accumulation."""
+        try:
+            dlg.open = False
+            self.page.overlay.remove(dlg)
+        except Exception:
+            pass
+
     def _set_view(self, content: ft.Control):
+        # Clear any stale dialogs left over from the previous screen
+        self.page.overlay.clear()
         self.root.content = content
         self.page.update()
 
@@ -1141,7 +1151,7 @@ class LinupApp:
             dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
 
             def confirm_delete(ev2):
-                dlg.open = False
+                self._close_dlg(dlg)
                 self.page.update()
                 conn3 = self._get_conn()
                 if conn3:
@@ -1160,7 +1170,7 @@ class LinupApp:
                 self.show_load_investments()
 
             def cancel_delete(ev2):
-                dlg.open = False
+                self._close_dlg(dlg)
                 self.page.update()
 
             dlg.title = ft.Text("DELETE INVESTMENT", color='#ff4444',
@@ -1507,7 +1517,7 @@ class LinupApp:
         dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
 
         def cerrar(ev):
-            dlg.open = False
+            self._close_dlg(dlg)
             self.page.update()
             self._go_home()
 
@@ -1569,7 +1579,7 @@ class LinupApp:
         dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
 
         def cerrar(ev):
-            dlg.open = False
+            self._close_dlg(dlg)
             self.page.update()
             self._go_home()
 
@@ -2034,7 +2044,6 @@ class LinupApp:
             )
         self.reg_header_row.update()
         self.reg_rows_box.update()
-        self.page.update()
 
     # ──────────────────────────────────────────────────────────────────
     # VISUAL FEEDBACK
@@ -2165,9 +2174,9 @@ class LinupApp:
 
             self.history_nums.append(num)
             self.sliding_window.append(num)
-            self.update_ui()
-            self.update_registration_table()
-            self.actualizar_sugerencias()
+            self.update_registration_table()   # buffers row/header updates
+            self.actualizar_sugerencias()       # buffers sug_row update
+            self.update_ui()                    # single page.update() flushes all
         except Exception as _err:
             import traceback
             with open(os.path.join(tempfile.gettempdir(), "linup_error.log"), "a") as _f:
@@ -2333,11 +2342,11 @@ class LinupApp:
         dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
 
         def on_cancel(_ev):
-            dlg.open = False
+            self._close_dlg(dlg)
             self.page.update()
 
         def cerrar(_ev):
-            dlg.open = False
+            self._close_dlg(dlg)
             self.page.update()
             on_ready_cb()
 
@@ -2461,12 +2470,12 @@ class LinupApp:
         dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
 
         def continuar(ev):
-            dlg.open = False
+            self._close_dlg(dlg)
             self.page.update()
             on_confirm()
 
         def volver(ev):
-            dlg.open = False
+            self._close_dlg(dlg)
             self.page.update()
 
         dlg.title = ft.Text(
@@ -2751,8 +2760,8 @@ class LinupApp:
                         self.nivel_martingala_in -= 1
             self.last_bet_outside = None
             self.last_prog_state  = True
-            self.update_ui()
             self.update_registration_table()
+            self.update_ui()
 
 
 # ──────────────────────────────────────────────────────────────────────
