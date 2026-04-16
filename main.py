@@ -312,12 +312,15 @@ class LinupApp:
         self.idx_fibo_in          = 0
         self.nivel_martingala_in  = 0
         self.last_bet_outside     = None
+        self.last_prog_state      = True   # was progression on when last bet resolved
         self.last_bank_delta      = 0.0
         self.stop_loss_triggered  = False
         self.activa               = False
         self.free_spin_mode       = False
         self.live_table_mode      = False
-        self.live_filter       = None   # None, 'R', 'B'
+        self.live_filter          = None   # None, 'R', 'B'
+        self.prog_on              = True   # progression on/off
+        self.fixed_multi          = 1      # 1-5 when progression is off
         self.grupos_activos       = []
         self.history_nums         = []
         self.sliding_window       = deque(maxlen=6)
@@ -1658,6 +1661,79 @@ class LinupApp:
             content=ft.Row(controls=[self.lbl_bank, self.lbl_inv, self.lbl_pl]),
         )
 
+        # ── Progression ON/OFF + fixed multiplier bar ─────────────────────
+        self.prog_on     = True
+        self.fixed_multi = 1
+
+        _PROG_ON_COLOR  = '#2ecc71'
+        _PROG_OFF_COLOR = '#e67e22'
+        _MULTI_ACT      = '#f39c12'
+        _MULTI_INACT    = '#3a3a3a'
+
+        _prog_lbl  = ft.Text("PROG: ON", color=ft.Colors.WHITE,
+                              weight=ft.FontWeight.BOLD, size=11)
+        _prog_ref  = [None]
+        _multi_refs: dict = {}   # multiplier int → button ref
+
+        def _refresh_prog_ui():
+            on = self.prog_on
+            m  = self.fixed_multi
+            _prog_lbl.value = "PROG: ON" if on else "PROG: OFF"
+            _prog_ref[0].style = ft.ButtonStyle(
+                bgcolor=_PROG_ON_COLOR if on else _PROG_OFF_COLOR,
+                color=ft.Colors.WHITE,
+            )
+            _prog_ref[0].update()
+            _prog_lbl.update()
+            for mx, btn in _multi_refs.items():
+                btn.visible = not on
+                btn.style = ft.ButtonStyle(
+                    bgcolor=_MULTI_ACT if mx == m else _MULTI_INACT,
+                    color=ft.Colors.WHITE,
+                )
+                btn.update()
+            self.update_inv_label()
+            if self.lbl_inv:
+                self.lbl_inv.update()
+
+        def _toggle_prog(_e):
+            self.prog_on = not self.prog_on
+            _refresh_prog_ui()
+
+        def _make_multi_handler(mx):
+            def handler(_e):
+                self.fixed_multi = mx
+                _refresh_prog_ui()
+            return handler
+
+        _prog_btn = ft.ElevatedButton(
+            content=_prog_lbl, height=30, expand=2,
+            style=ft.ButtonStyle(bgcolor=_PROG_ON_COLOR, color=ft.Colors.WHITE),
+            on_click=_toggle_prog,
+        )
+        _prog_ref[0] = _prog_btn
+
+        _multi_btn_list = []
+        for _mx in (1, 2, 3, 4, 5):
+            _mb = ft.ElevatedButton(
+                content=ft.Text(f"{_mx}x", size=10,
+                                weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                height=30, expand=1, visible=False,
+                style=ft.ButtonStyle(
+                    bgcolor=_MULTI_ACT if _mx == 1 else _MULTI_INACT,
+                    color=ft.Colors.WHITE,
+                ),
+                on_click=_make_multi_handler(_mx),
+            )
+            _multi_refs[_mx] = _mb
+            _multi_btn_list.append(_mb)
+
+        prog_bar = ft.Container(
+            bgcolor='#161616', padding=ft.padding.symmetric(horizontal=4, vertical=3),
+            content=ft.Row(controls=[_prog_btn] + _multi_btn_list, spacing=3),
+        )
+        # ──────────────────────────────────────────────────────────────────
+
         self.sug_row = ft.Row(
             controls=[
                 ft.ElevatedButton(
@@ -1870,7 +1946,7 @@ class LinupApp:
                 content=ft.Column(
                     expand=True, spacing=0,
                     controls=inv_bar_controls + [
-                        stats_bar, sug_bar,
+                        stats_bar, prog_bar, sug_bar,
                     ] + ([rb_bar] if rb_bar else []) + [
                         mixer_box, ctrl_bar,
                         ft.Container(
@@ -1997,23 +2073,34 @@ class LinupApp:
             return self.val_fin * len(GRUPOS_MAESTROS[g])
         return self.val_fout
 
+    def _current_multi(self, is_out: bool) -> int:
+        """Return the active multiplier for outside or inside bets."""
+        if not self.prog_on:
+            return self.fixed_multi
+        n = len(self.grupos_activos)
+        if is_out:
+            if n == 1:
+                return PROG_FIBO[self.idx_fibo_out]
+            return self.PROG_2_OUT[min(self.nivel_martingala_out, len(self.PROG_2_OUT) - 1)]
+        if n == 1:
+            return PROG_FIBO[self.idx_fibo_in]
+        return self.PROG_2_IN[min(self.nivel_martingala_in, len(self.PROG_2_IN) - 1)]
+
     def _compute_bet(self):
         n = len(self.grupos_activos)
         if n == 0:
             return 0.0, 0.0
 
         is_out = self._is_outside()
+        multi  = self._current_multi(is_out)
         if is_out:
             if n == 1:
-                multi      = PROG_FIBO[self.idx_fibo_out]
                 total      = self.val_fout * multi
                 win_payout = total * 3
             else:
-                idx        = min(self.nivel_martingala_out, len(self.PROG_2_OUT) - 1)
-                total      = self.val_fout * self.PROG_2_OUT[idx]
+                total      = self.val_fout * multi
                 win_payout = (total / n) * 3
         else:
-            multi      = PROG_FIBO[self.idx_fibo_in] if n == 1 else self.PROG_2_IN[min(self.nivel_martingala_in, len(self.PROG_2_IN) - 1)]
             total      = sum(self._group_cost(g) * multi for g in self.grupos_activos)
             win_payout = self.val_fin * 36 * multi
 
@@ -2029,35 +2116,40 @@ class LinupApp:
 
             num = int(e.control.data)
             if self.activa:
-                n                    = len(self.grupos_activos)
-                is_out               = self._is_outside()
+                n                     = len(self.grupos_activos)
+                is_out                = self._is_outside()
                 self.last_bet_outside = is_out
-                total_cost, win_py   = self._compute_bet()
-                self.banca_actual   -= total_cost
+                self.last_prog_state  = self.prog_on   # save for undo
+                total_cost, win_py    = self._compute_bet()
+                self.banca_actual    -= total_cost
 
                 if any(num in GRUPOS_MAESTROS[g] for g in self.grupos_activos):
                     self.banca_actual += win_py
                     self.last_bank_delta = win_py - total_cost
-                    if is_out:
-                        self.idx_fibo_out         = 0
-                        self.nivel_martingala_out = 0
-                    else:
-                        self.idx_fibo_in         = 0
-                        self.nivel_martingala_in = 0
+                    # Only reset progression counters when progression is active
+                    if self.prog_on:
+                        if is_out:
+                            self.idx_fibo_out         = 0
+                            self.nivel_martingala_out = 0
+                        else:
+                            self.idx_fibo_in         = 0
+                            self.nivel_martingala_in = 0
                 else:
                     self.last_bank_delta = -total_cost
-                    if n == 1:
-                        if is_out:
-                            if self.idx_fibo_out < len(PROG_FIBO) - 1:
-                                self.idx_fibo_out += 1
+                    # Only advance progression counters when progression is active
+                    if self.prog_on:
+                        if n == 1:
+                            if is_out:
+                                if self.idx_fibo_out < len(PROG_FIBO) - 1:
+                                    self.idx_fibo_out += 1
+                            else:
+                                if self.idx_fibo_in < len(PROG_FIBO) - 1:
+                                    self.idx_fibo_in += 1
                         else:
-                            if self.idx_fibo_in < len(PROG_FIBO) - 1:
-                                self.idx_fibo_in += 1
-                    else:
-                        if is_out:
-                            self.nivel_martingala_out += 1
-                        else:
-                            self.nivel_martingala_in += 1
+                            if is_out:
+                                self.nivel_martingala_out += 1
+                            else:
+                                self.nivel_martingala_in += 1
                 self.activa         = False
                 self.grupos_activos = []
                 self.limpiar_seleccion_visual()
@@ -2141,8 +2233,7 @@ class LinupApp:
     def _show_roulette_chip_popup(self, on_ready_cb):
         """Show vertical roulette chip placement popup for all active straight groups.
         Calls on_ready_cb() when the user dismisses with READY."""
-        grp_count    = len(self.grupos_activos)
-        multi        = PROG_FIBO[self.idx_fibo_in] if grp_count == 1 else self.PROG_2_IN[min(self.nivel_martingala_in, len(self.PROG_2_IN) - 1)]
+        multi        = self._current_multi(is_out=False)
         chip_per_num = self.val_fin * multi
         total_cost, _ = self._compute_bet()   # exact amount that will hit the bank
 
@@ -2264,6 +2355,60 @@ class LinupApp:
                 ),
             ],
         )
+        _total_lbl = ft.Text(
+            f"Total: ${total_cost:.2f}  ({len(all_nums)} × ${chip_per_num:.2f})",
+            color='#ecf0f1', size=12, weight=ft.FontWeight.BOLD,
+            text_align=ft.TextAlign.CENTER,
+        )
+        _chip_lbl = dlg.title.controls[0].controls[-1]  # the $/num text in title row
+
+        # When progression is OFF, show live multiplier picker inside the popup
+        popup_extra: list = []
+        if not self.prog_on:
+            _pmx_refs: dict = {}
+
+            def _make_pmx(mx):
+                def handler(_ev):
+                    self.fixed_multi = mx
+                    _c  = self.val_fin * mx
+                    _t  = len(all_nums) * _c
+                    _chip_lbl.value  = f"${_c:.2f}/num"
+                    _total_lbl.value = f"Total: ${_t:.2f}  ({len(all_nums)} × ${_c:.2f})"
+                    for k, b in _pmx_refs.items():
+                        b.style = ft.ButtonStyle(
+                            bgcolor='#f39c12' if k == mx else '#3a3a3a',
+                            color=ft.Colors.WHITE,
+                        )
+                        b.update()
+                    _chip_lbl.update()
+                    _total_lbl.update()
+                    self.update_inv_label()
+                    if self.lbl_inv:
+                        self.lbl_inv.update()
+                return handler
+
+            mx_row = ft.Row(spacing=3, tight=True)
+            for _mx in (1, 2, 3, 4, 5):
+                _mb = ft.ElevatedButton(
+                    content=ft.Text(f"{_mx}x", size=11,
+                                    weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                    expand=True, height=34,
+                    style=ft.ButtonStyle(
+                        bgcolor='#f39c12' if _mx == self.fixed_multi else '#3a3a3a',
+                        color=ft.Colors.WHITE,
+                    ),
+                    on_click=_make_pmx(_mx),
+                )
+                _pmx_refs[_mx] = _mb
+                mx_row.controls.append(_mb)
+
+            popup_extra = [
+                ft.Container(height=6),
+                ft.Text("MULTIPLIER", color='#aaaaaa', size=10,
+                        text_align=ft.TextAlign.CENTER),
+                mx_row,
+            ]
+
         dlg.content = ft.Column(
             tight=True,
             scroll=ft.ScrollMode.AUTO,
@@ -2272,12 +2417,8 @@ class LinupApp:
                 ft.Container(height=4),
                 grid,
                 ft.Container(height=8),
-                ft.Text(
-                    f"Total: ${total_cost:.2f}  ({len(all_nums)} × ${chip_per_num:.2f})",
-                    color='#ecf0f1', size=12, weight=ft.FontWeight.BOLD,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-            ],
+                _total_lbl,
+            ] + popup_extra,
         )
         dlg.actions = [
             ft.ElevatedButton(
@@ -2547,20 +2688,16 @@ class LinupApp:
             return
         if self.activa or self.grupos_activos:
             total, _ = self._compute_bet()
-            n      = len(self.grupos_activos)
             is_out = self._is_outside()
+            multi  = self._current_multi(is_out)
             if is_out:
                 chip_val  = self.val_fout
-                if n == 1:
-                    num_chips = PROG_FIBO[self.idx_fibo_out]
-                else:
-                    idx       = min(self.nivel_martingala_out, len(self.PROG_2_OUT) - 1)
-                    num_chips = self.PROG_2_OUT[idx]
+                num_chips = multi
             else:
                 chip_val  = self.val_fin
-                multi     = PROG_FIBO[self.idx_fibo_in] if n == 1 else self.PROG_2_IN[min(self.nivel_martingala_in, len(self.PROG_2_IN) - 1)]
                 num_chips = sum(len(GRUPOS_MAESTROS[g]) for g in self.grupos_activos) * multi
-            self.lbl_inv.value = f"BET: ${total:.2f} ({num_chips}x${chip_val:.4g})"
+            prog_tag = "" if self.prog_on else f" [{multi}x]"
+            self.lbl_inv.value = f"BET: ${total:.2f} ({num_chips}x${chip_val:.4g}){prog_tag}"
         else:
             self.lbl_inv.value = "BET: $0.00"
 
@@ -2600,18 +2737,20 @@ class LinupApp:
             # Reverse bank
             self.banca_actual -= self.last_bank_delta
             self.last_bank_delta = 0.0
-            # Reverse progression
-            if self.last_bet_outside is True:
-                if self.idx_fibo_out > 0:
-                    self.idx_fibo_out -= 1
-                if self.nivel_martingala_out > 0:
-                    self.nivel_martingala_out -= 1
-            elif self.last_bet_outside is False:
-                if self.idx_fibo_in > 0:
-                    self.idx_fibo_in -= 1
-                if self.nivel_martingala_in > 0:
-                    self.nivel_martingala_in -= 1
+            # Reverse progression only if that bet was running with progression on
+            if getattr(self, 'last_prog_state', True):
+                if self.last_bet_outside is True:
+                    if self.idx_fibo_out > 0:
+                        self.idx_fibo_out -= 1
+                    if self.nivel_martingala_out > 0:
+                        self.nivel_martingala_out -= 1
+                elif self.last_bet_outside is False:
+                    if self.idx_fibo_in > 0:
+                        self.idx_fibo_in -= 1
+                    if self.nivel_martingala_in > 0:
+                        self.nivel_martingala_in -= 1
             self.last_bet_outside = None
+            self.last_prog_state  = True
             self.update_ui()
             self.update_registration_table()
 
