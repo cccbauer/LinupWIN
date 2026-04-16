@@ -346,10 +346,11 @@ class LinupApp:
     # NAVIGATION
     # ──────────────────────────────────────────────────────────────────
     def _close_dlg(self, dlg: ft.AlertDialog):
-        """Close a dialog and remove it from the overlay to prevent accumulation."""
+        """Close a dialog, sync to client, then remove from overlay."""
         try:
             dlg.open = False
-            self.page.overlay.remove(dlg)
+            self.page.update()          # client sees dialog close while it's still in overlay
+            self.page.overlay.remove(dlg)  # Python-side cleanup — no extra update needed
         except Exception:
             pass
 
