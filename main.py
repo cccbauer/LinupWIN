@@ -103,7 +103,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v14.0"
+        self.page.title      = "Linup v15.0"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -222,6 +222,18 @@ class LinupApp:
                     "(id INTEGER PRIMARY KEY AUTOINCREMENT, "
                     " investment_id INTEGER, mesa_name TEXT, init_bank REAL)"
                 )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS compound_sessions "
+                    "(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    " investment_id INTEGER NOT NULL DEFAULT 0, "
+                    " session_num INTEGER NOT NULL, "
+                    " date TEXT NOT NULL, "
+                    " mesa TEXT NOT NULL, "
+                    " bank_start REAL NOT NULL, "
+                    " bank_end REAL NOT NULL, "
+                    " profit REAL NOT NULL, "
+                    " profit_pct REAL NOT NULL)"
+                )
                 conn.commit()
                 try:
                     conn.execute("ALTER TABLE sesiones ADD COLUMN banca_inicial REAL")
@@ -275,6 +287,36 @@ class LinupApp:
                 conn.close()
         except Exception as ex:
             return False, str(ex)
+
+    def _save_compound_session(self):
+        """Persist this session to compound_sessions for actual growth tracking."""
+        inv_id = self.current_investment_id or 0
+        conn   = self._get_conn()
+        if not conn:
+            return
+        try:
+            cursor  = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM compound_sessions WHERE investment_id=?",
+                (inv_id,)
+            )
+            session_num = (cursor.fetchone()[0] or 0) + 1
+            date_str    = datetime.now().strftime('%y.%m.%d')
+            profit      = round(self.banca_actual - self.banca_inicial, 2)
+            profit_pct  = (profit / self.banca_inicial * 100) if self.banca_inicial else 0.0
+            conn.execute(
+                "INSERT INTO compound_sessions "
+                "(investment_id, session_num, date, mesa, bank_start, bank_end, profit, profit_pct) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (inv_id, session_num, date_str, str(self.nombre_mesa),
+                 round(self.banca_inicial, 2), round(self.banca_actual, 2),
+                 profit, round(profit_pct, 2))
+            )
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
 
     def _update_table_stats(self, is_win: bool):
         """Increment win or loss counter and update last_bank for this table.
@@ -374,7 +416,7 @@ class LinupApp:
                         ft.Text("Linup", color='#3498db', size=64,
                                 weight=ft.FontWeight.BOLD),
                         ft.Container(height=8),
-                        ft.Text("v14.0", color='#7f8c8d', size=18),
+                        ft.Text("v15.0", color='#7f8c8d', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -739,6 +781,63 @@ class LinupApp:
                         style=ft.ButtonStyle(bgcolor='#2980b9', color=ft.Colors.WHITE),
                     )
                 )
+
+                # ── Actual saved sessions ──────────────────────────────
+                cursor.execute(
+                    "SELECT session_num, date, mesa, profit, profit_pct "
+                    "FROM compound_sessions WHERE investment_id=? ORDER BY id",
+                    (investment_id,)
+                )
+                saved_sessions = cursor.fetchall()
+                if saved_sessions:
+                    session_rows = [
+                        ft.Text("ACTUAL SESSIONS", color='#3498db', size=11,
+                                weight=ft.FontWeight.BOLD,
+                                text_align=ft.TextAlign.CENTER),
+                    ]
+                    running = float(inv_capital)
+                    for s_num, s_date, s_mesa, s_profit, s_pct in saved_sessions:
+                        running += s_profit
+                        sign  = "+" if s_profit >= 0 else ""
+                        col   = '#2ecc71' if s_profit >= 0 else '#ff4444'
+                        session_rows.append(
+                            ft.Container(
+                                bgcolor='#1a1a2e', border_radius=4,
+                                padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                                margin=ft.margin.only(bottom=2),
+                                content=ft.Row(controls=[
+                                    ft.Text(f"#{s_num}  {s_date}", color='#aaaaaa',
+                                            size=10, width=90),
+                                    ft.Text(s_mesa, color=ft.Colors.WHITE,
+                                            size=10, expand=True),
+                                    ft.Text(f"{sign}${s_profit:.2f} ({sign}{s_pct:.1f}%)",
+                                            color=col, size=10,
+                                            weight=ft.FontWeight.BOLD),
+                                ], spacing=6),
+                            )
+                        )
+                    # Running total row
+                    run_col  = '#2ecc71' if running >= float(inv_capital) else '#ff4444'
+                    run_diff = running - float(inv_capital)
+                    run_sign = "+" if run_diff >= 0 else ""
+                    session_rows.append(
+                        ft.Container(
+                            bgcolor='#0d1a0d', border_radius=4,
+                            padding=ft.padding.symmetric(horizontal=8, vertical=5),
+                            margin=ft.margin.only(top=4),
+                            content=ft.Text(
+                                f"Running total: ${running:.2f}  ({run_sign}${run_diff:.2f})",
+                                color=run_col, size=11, weight=ft.FontWeight.BOLD,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
+                        )
+                    )
+                    table_rows.append(ft.Container(
+                        bgcolor='#111111', border_radius=6,
+                        padding=8, margin=ft.margin.only(top=10),
+                        content=ft.Column(controls=session_rows, spacing=2),
+                    ))
+
             except Exception as ex:
                 table_rows.append(ft.Text(f"Error: {ex}", color='#ff4444'))
             finally:
@@ -1565,7 +1664,13 @@ class LinupApp:
 
         dlg = ft.AlertDialog(modal=True, bgcolor='#1e1e1e')
 
-        def cerrar(ev):
+        def saltar(ev):
+            dlg.open = False
+            dlg.update()
+            self._go_home()
+
+        def guardar(ev):
+            self._save_compound_session()
             dlg.open = False
             dlg.update()
             self._go_home()
@@ -1595,11 +1700,15 @@ class LinupApp:
         )
         dlg.actions = [
             ft.ElevatedButton(
-                content=ft.Text("OK", size=15, weight=ft.FontWeight.BOLD),
-                on_click=cerrar,
-                expand=True,
-                style=ft.ButtonStyle(bgcolor=color, color=ft.Colors.WHITE),
-            )
+                content=ft.Text("SKIP", size=14, weight=ft.FontWeight.BOLD),
+                on_click=saltar, expand=1,
+                style=ft.ButtonStyle(bgcolor='#555555', color=ft.Colors.WHITE),
+            ),
+            ft.ElevatedButton(
+                content=ft.Text("SAVE", size=14, weight=ft.FontWeight.BOLD),
+                on_click=guardar, expand=1,
+                style=ft.ButtonStyle(bgcolor='#2ecc71', color=ft.Colors.WHITE),
+            ),
         ]
         dlg.actions_alignment = ft.MainAxisAlignment.CENTER
         self.page.show_dialog(dlg)
