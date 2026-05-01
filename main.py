@@ -289,7 +289,8 @@ class LinupApp:
             return False, str(ex)
 
     def _save_compound_session(self):
-        """Persist this session to compound_sessions for actual growth tracking."""
+        """Persist this session to compound_sessions (DB + CSV)."""
+        import csv
         inv_id = self.current_investment_id or 0
         conn   = self._get_conn()
         if not conn:
@@ -303,16 +304,30 @@ class LinupApp:
             session_num = (cursor.fetchone()[0] or 0) + 1
             date_str    = datetime.now().strftime('%y.%m.%d')
             profit      = round(self.banca_actual - self.banca_inicial, 2)
-            profit_pct  = (profit / self.banca_inicial * 100) if self.banca_inicial else 0.0
+            profit_pct  = round((profit / self.banca_inicial * 100) if self.banca_inicial else 0.0, 2)
+            bank_start  = round(self.banca_inicial, 2)
+            bank_end    = round(self.banca_actual, 2)
+            mesa        = str(self.nombre_mesa)
+
             conn.execute(
                 "INSERT INTO compound_sessions "
                 "(investment_id, session_num, date, mesa, bank_start, bank_end, profit, profit_pct) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (inv_id, session_num, date_str, str(self.nombre_mesa),
-                 round(self.banca_inicial, 2), round(self.banca_actual, 2),
-                 profit, round(profit_pct, 2))
+                (inv_id, session_num, date_str, mesa,
+                 bank_start, bank_end, profit, profit_pct)
             )
             conn.commit()
+
+            # Mirror to CSV next to the DB for easy spreadsheet access
+            csv_path  = self.db_path.replace('.db', '_compound.csv')
+            write_hdr = not os.path.exists(csv_path)
+            with open(csv_path, 'a', newline='') as f:
+                w = csv.writer(f)
+                if write_hdr:
+                    w.writerow(['investment_id', 'session_num', 'date', 'mesa',
+                                'bank_start', 'bank_end', 'profit', 'profit_pct'])
+                w.writerow([inv_id, session_num, date_str, mesa,
+                            bank_start, bank_end, profit, profit_pct])
         except Exception:
             pass
         finally:
@@ -757,49 +772,31 @@ class LinupApp:
                         ),
                     ))
 
-                # ── Compound interest section ──────────────────────────
+                # ── Actual saved sessions (primary view) ───────────────
                 num_sessions = total_wins + total_losses
                 per_session_rate = (
                     (total_pl / float(inv_capital) / num_sessions)
                     if (num_sessions > 0 and float(inv_capital) > 0) else 0.0
                 )
-                table_rows.append(ft.Container(height=16))
-                table_rows.append(
-                    self._build_compound_widget(7, float(inv_capital), per_session_rate, te)
-                )
-                table_rows.append(ft.Container(height=6))
 
-                def _open_custom(ev, r=per_session_rate, c=float(inv_capital),
-                                 n=inv_name, iid=investment_id, e=te):
-                    self.show_compound_custom_view(iid, n, c, r, e)
-
-                table_rows.append(
-                    ft.ElevatedButton(
-                        "CUSTOM PERIOD",
-                        on_click=_open_custom,
-                        height=45, expand=True,
-                        style=ft.ButtonStyle(bgcolor='#2980b9', color=ft.Colors.WHITE),
-                    )
-                )
-
-                # ── Actual saved sessions ──────────────────────────────
                 cursor.execute(
                     "SELECT session_num, date, mesa, profit, profit_pct "
                     "FROM compound_sessions WHERE investment_id=? ORDER BY id",
                     (investment_id,)
                 )
                 saved_sessions = cursor.fetchall()
+
+                session_rows = [
+                    ft.Text("ACTUAL SESSIONS", color='#3498db', size=11,
+                            weight=ft.FontWeight.BOLD,
+                            text_align=ft.TextAlign.CENTER),
+                ]
                 if saved_sessions:
-                    session_rows = [
-                        ft.Text("ACTUAL SESSIONS", color='#3498db', size=11,
-                                weight=ft.FontWeight.BOLD,
-                                text_align=ft.TextAlign.CENTER),
-                    ]
                     running = float(inv_capital)
                     for s_num, s_date, s_mesa, s_profit, s_pct in saved_sessions:
                         running += s_profit
-                        sign  = "+" if s_profit >= 0 else ""
-                        col   = '#2ecc71' if s_profit >= 0 else '#ff4444'
+                        sign = "+" if s_profit >= 0 else ""
+                        col  = '#2ecc71' if s_profit >= 0 else '#ff4444'
                         session_rows.append(
                             ft.Container(
                                 bgcolor='#1a1a2e', border_radius=4,
@@ -816,7 +813,6 @@ class LinupApp:
                                 ], spacing=6),
                             )
                         )
-                    # Running total row
                     run_col  = '#2ecc71' if running >= float(inv_capital) else '#ff4444'
                     run_diff = running - float(inv_capital)
                     run_sign = "+" if run_diff >= 0 else ""
@@ -832,11 +828,33 @@ class LinupApp:
                             ),
                         )
                     )
-                    table_rows.append(ft.Container(
-                        bgcolor='#111111', border_radius=6,
-                        padding=8, margin=ft.margin.only(top=10),
-                        content=ft.Column(controls=session_rows, spacing=2),
-                    ))
+                else:
+                    session_rows.append(
+                        ft.Text("No sessions saved yet — press SAVE after a session.",
+                                color='#7f8c8d', size=11,
+                                text_align=ft.TextAlign.CENTER)
+                    )
+
+                table_rows.append(ft.Container(
+                    bgcolor='#111111', border_radius=6,
+                    padding=8, margin=ft.margin.only(top=10),
+                    content=ft.Column(controls=session_rows, spacing=2),
+                ))
+
+                # ── Compound growth projection button ──────────────────
+                def _open_projection(_ev, r=per_session_rate, c=float(inv_capital),
+                                     n=inv_name, iid=investment_id, e=te):
+                    self.show_compound_custom_view(iid, n, c, r, e)
+
+                table_rows.append(ft.Container(height=6))
+                table_rows.append(
+                    ft.ElevatedButton(
+                        "COMPOUND GROWTH",
+                        on_click=_open_projection,
+                        height=45, expand=True,
+                        style=ft.ButtonStyle(bgcolor='#2980b9', color=ft.Colors.WHITE),
+                    )
+                )
 
             except Exception as ex:
                 table_rows.append(ft.Text(f"Error: {ex}", color='#ff4444'))
