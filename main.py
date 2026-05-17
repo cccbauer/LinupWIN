@@ -6,7 +6,6 @@ import math
 import random
 from datetime import datetime
 import asyncio
-import tempfile
 
 # --- GROUP CONFIGURATION ---
 ROJOS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
@@ -29,9 +28,17 @@ GRUPOS_MAESTROS = {
     'W2': {6, 9, 13, 14, 17, 18, 22, 25, 27, 29, 31, 34},
     # W3 Through: remaining       → 12 numbers
     'W3': {1, 5, 8, 10, 11, 16, 20, 23, 24, 30, 33, 36},
+    # Filter groups (for mixer combinations)
+    'R': ROJOS,
+    'B': set(range(1, 37)) - ROJOS,
+    'Even': {n for n in range(2, 37, 2)},
+    'Odd': {n for n in range(1, 37, 2)},
+    '1-18': set(range(1, 19)),
+    '19-36': set(range(19, 37)),
 }
 PROG_FIBO = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55]
 C_COL, C_DOC, C_SEC, C_SET, C_WAV = '#00d2ff', '#2ecc71', '#e67e22', '#9b59b6', '#e91e63'
+C_FLT_R, C_FLT_B, C_FLT_E, C_FLT_O, C_FLT_18, C_FLT_36 = '#c0392b', '#222222', '#446644', '#664444', '#555577', '#445566'
 NUM_COLS = 20
 
 # ── Wheel neighbours (European single-zero wheel order) ──────────────
@@ -103,18 +110,21 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v15.0"
+        self.page.title      = "Linup v17.0.0"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
         self.page.scroll     = None
         self.page.on_resized = self._on_resize
 
-        # window settings
-        self.page.window.width      = 420
-        self.page.window.height     = 860
-        self.page.window.min_width  = 380
-        self.page.window.min_height = 700
+        # Desktop-only window sizing (Android/iOS fill screen natively)
+        _mobile = self.page.platform in (
+            ft.PagePlatform.ANDROID, ft.PagePlatform.IOS)
+        if not _mobile:
+            self.page.window.width      = 420
+            self.page.window.height     = 860
+            self.page.window.min_width  = 380
+            self.page.window.min_height = 700
 
         self.root = ft.Container(expand=True, bgcolor='#1a1a1a')
         self.page.add(self.root)
@@ -144,14 +154,15 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     def _col_width(self):
         w  = self.page.width or 360
-        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave']})
+        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave','filters']})
         n  = (1
               + (6 if vc.get('basic',  True) else 0)
               + (3 if vc.get('cols',   True) else 0)
               + (3 if vc.get('docs',   True) else 0)
               + (4 if vc.get('secs',   True) else 0)
               + (3 if vc.get('thirds', True) else 0)
-              + (3 if vc.get('wave',   True) else 0))
+              + (3 if vc.get('wave',   True) else 0)
+              + (4 if vc.get('filters', True) else 0))
         return max(11, int((w - 4) / max(n, 1)))
 
     def _on_resize(self, e):
@@ -170,7 +181,7 @@ class LinupApp:
         candidates += [
             os.path.join(os.path.expanduser("~"), "linup_data"),
             os.path.join(os.getcwd(), "linup_data"),
-            os.path.join(tempfile.gettempdir(), "linup_data"),
+            os.path.join("/tmp", "linup_data"),
         ]
         self.db_path = None
         for data_dir in candidates:
@@ -239,7 +250,23 @@ class LinupApp:
                     conn.execute("ALTER TABLE sesiones ADD COLUMN banca_inicial REAL")
                     conn.commit()
                 except Exception:
-                    pass  # column already exists
+                    pass
+                try:
+                    conn.execute("ALTER TABLE investments ADD COLUMN inv_type TEXT DEFAULT 'FIAT'")
+                    conn.commit()
+                except Exception:
+                    pass
+                for _col in [
+                    "ALTER TABLE investment_tables ADD COLUMN token_symbol TEXT DEFAULT ''",
+                    "ALTER TABLE investment_tables ADD COLUMN token_balance REAL DEFAULT 0",
+                    "ALTER TABLE investment_tables ADD COLUMN token_price REAL DEFAULT 0",
+                    "ALTER TABLE investment_tables ADD COLUMN chips_per_token REAL DEFAULT 0",
+                ]:
+                    try:
+                        conn.execute(_col)
+                        conn.commit()
+                    except Exception:
+                        pass
                 conn.close()
                 self.db_path = db_path
                 break
@@ -377,6 +404,8 @@ class LinupApp:
         self.live_table_mode      = False
         self.live_filter          = None   # None, 'R', 'B'
         self.prog_on              = True   # progression on/off
+        self.sniper_mode          = True   # sniper mode on/off (intersection of groups) - default ON
+        self.sniper_safety_level  = 1      # 1-5 safety level when sniper is off
         self.fixed_multi          = 1      # 1-5 when progression is off
         self.grupos_activos       = []
         self.history_nums         = []
@@ -388,6 +417,7 @@ class LinupApp:
         self.inv_name             = ""
         self.inv_capital          = 0.0
         self.inv_other_pl         = 0.0
+        self.inv_type             = 'FIAT'
         # Which column categories are shown in the registration table / mixer
         if not hasattr(self, 'visible_cats'):
             self.visible_cats = {
@@ -397,7 +427,63 @@ class LinupApp:
                 'secs':   True,   # Z0 ZG ZP H
                 'thirds': True,   # T1 T2 T3
                 'wave':   True,   # W1 W2 W3
+                'filters': True,  # R B 1-18 19-36
             }
+
+    def _fmt_bank(self, val: float) -> str:
+        if self.inv_type == 'CHIPS':
+            return f"{int(round(val)):,}"
+        return f"${val:.2f}"
+
+    # ──────────────────────────────────────────────────────────────────
+    # CRYPTO PRICE FETCH  (CoinGecko free API, no key required)
+    # ──────────────────────────────────────────────────────────────────
+    # symbol → (display label, coingecko_id or None for stablecoins)
+    _TOKENS = [
+        ('BTC',  'BTC – Bitcoin',   'bitcoin'),
+        ('ETH',  'ETH – Ethereum',  'ethereum'),
+        ('SOL',  'SOL – Solana',    'solana'),
+        ('BNB',  'BNB – BNB Chain', 'binancecoin'),
+        ('XRP',  'XRP – XRP',       'ripple'),
+        ('ADA',  'ADA – Cardano',   'cardano'),
+        ('DOGE', 'DOGE – Dogecoin', 'dogecoin'),
+        ('USDT', 'USDT – Tether',   None),
+        ('USDC', 'USDC – USD Coin', None),
+    ]
+
+    async def _fetch_token_price(self, symbol: str) -> float:
+        import urllib.request, json, ssl
+        sym = symbol.upper()
+        # Stablecoins — no network call needed
+        token = next((t for t in self._TOKENS if t[0] == sym), None)
+        if token and token[2] is None:
+            return 1.0
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode    = ssl.CERT_NONE
+        loop = asyncio.get_running_loop()
+        # Primary: Binance spot price (SYMBOLUSDT pair)
+        try:
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={sym}USDT"
+            def _binance():
+                with urllib.request.urlopen(url, timeout=6, context=ctx) as r:
+                    return json.loads(r.read())
+            data = await loop.run_in_executor(None, _binance)
+            return float(data['price'])
+        except Exception:
+            pass
+        # Fallback: CoinGecko
+        try:
+            coin_id = token[2] if token else sym.lower()
+            url = (f"https://api.coingecko.com/api/v3/simple/price"
+                   f"?ids={coin_id}&vs_currencies=usd")
+            def _coingecko():
+                with urllib.request.urlopen(url, timeout=8, context=ctx) as r:
+                    return json.loads(r.read())
+            data = await loop.run_in_executor(None, _coingecko)
+            return float(data[coin_id]['usd'])
+        except Exception:
+            return 0.0
 
     # ──────────────────────────────────────────────────────────────────
     # NAVIGATION
@@ -431,7 +517,7 @@ class LinupApp:
                         ft.Text("Linup", color='#3498db', size=64,
                                 weight=ft.FontWeight.BOLD),
                         ft.Container(height=8),
-                        ft.Text("v15.0", color='#7f8c8d', size=18),
+                        ft.Text("v17.0.0", color='#7f8c8d', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -491,13 +577,37 @@ class LinupApp:
             keyboard_type=ft.KeyboardType.NUMBER,
         )
 
+        inv_type = ['FIAT']
+
+        fiat_btn = ft.ElevatedButton(
+            "FIAT", expand=1, height=44,
+            style=ft.ButtonStyle(bgcolor='#27ae60', color=ft.Colors.WHITE),
+        )
+        chips_btn = ft.ElevatedButton(
+            "CHIPS", expand=1, height=44,
+            style=ft.ButtonStyle(bgcolor='#333333', color=ft.Colors.WHITE),
+        )
+        capital_label = ft.Text("Capital ($)", color='#7f8c8d', size=12)
+
+        def set_type(t):
+            inv_type[0] = t
+            fiat_btn.style  = ft.ButtonStyle(bgcolor='#27ae60' if t == 'FIAT'  else '#333333', color=ft.Colors.WHITE)
+            chips_btn.style = ft.ButtonStyle(bgcolor='#f39c12' if t == 'CHIPS' else '#333333', color=ft.Colors.WHITE)
+            capital_label.value = "Capital ($)  ·  auto-calculated from tables" if t == 'CHIPS' else "Capital ($)"
+            capital_field.visible = t == 'FIAT'
+            fiat_btn.update(); chips_btn.update()
+            capital_label.update(); capital_field.update()
+
+        fiat_btn.on_click  = lambda _e: set_type('FIAT')
+        chips_btn.on_click = lambda _e: set_type('CHIPS')
+
         def on_next(ev):
             try:
                 inv_name = inv_name_field.value.strip().upper() or "INVESTMENT 1"
-                capital  = float(capital_field.value or 0)
+                capital  = float(capital_field.value or 0) if inv_type[0] == 'FIAT' else 0.0
             except Exception:
                 return
-            self._show_num_tables_form(inv_name, capital)
+            self._show_num_tables_form(inv_name, capital, inv_type[0])
 
         self._set_view(
             ft.Container(
@@ -514,8 +624,13 @@ class LinupApp:
                         ft.Text("NEW INVESTMENT", color='#3498db', size=20,
                                 weight=ft.FontWeight.BOLD),
                         ft.Container(height=12),
+                        ft.Text("TYPE", color='#7f8c8d', size=12),
+                        ft.Container(height=4),
+                        ft.Row(controls=[fiat_btn, chips_btn], spacing=8),
+                        ft.Container(height=12),
                         inv_name_field,
                         ft.Container(height=8),
+                        capital_label,
                         capital_field,
                         ft.Container(height=20),
                         ft.ElevatedButton(
@@ -531,7 +646,7 @@ class LinupApp:
 
     # NEW INVESTMENT — Step 2: number of tables
     # ──────────────────────────────────────────────────────────────────
-    def _show_num_tables_form(self, inv_name: str, capital: float):
+    def _show_num_tables_form(self, inv_name: str, capital: float, inv_type: str = 'FIAT'):
         num_tables_field = ft.TextField(
             label="Number of Tables", value="1",
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=50,
@@ -543,7 +658,9 @@ class LinupApp:
                 num_tables = max(1, min(10, int(num_tables_field.value or 1)))
             except Exception:
                 return
-            self._show_table_setup(inv_name, capital, num_tables)
+            self._show_table_setup(inv_name, capital, num_tables, inv_type)
+
+        cap_txt = f"Capital: ${capital:,.2f}" if inv_type == 'FIAT' else f"Type: {inv_type}"
 
         self._set_view(
             ft.Container(
@@ -559,7 +676,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Text(inv_name, color='#3498db', size=20,
                                 weight=ft.FontWeight.BOLD),
-                        ft.Text(f"Capital: ${capital:,.2f}", color='#7f8c8d', size=14),
+                        ft.Text(cap_txt, color='#7f8c8d', size=14),
                         ft.Container(height=12),
                         num_tables_field,
                         ft.Container(height=20),
@@ -577,60 +694,219 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     # NEW INVESTMENT — Step 2: table names and banks
     # ──────────────────────────────────────────────────────────────────
-    def _show_table_setup(self, inv_name: str, capital: float, num_tables: int):
-        bank_per_table = round(capital * 0.03, 2)
-        name_fields = []
-        bank_fields = []
-        rows = []
-        for i in range(num_tables):
-            nf = ft.TextField(
-                value=f"TABLE {i + 1}",
-                bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
-                expand=2,
-            )
-            bf = ft.TextField(
-                value=str(bank_per_table),
-                bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
-                keyboard_type=ft.KeyboardType.NUMBER,
-                expand=1,
-            )
-            name_fields.append(nf)
-            bank_fields.append(bf)
-            rows.append(ft.Row(controls=[nf, bf], spacing=6))
+    def _show_table_setup(self, inv_name: str, capital: float, num_tables: int,
+                          inv_type: str = 'FIAT'):
+        # ── FIAT MODE ──────────────────────────────────────────────
+        if inv_type == 'FIAT':
+            bank_per_table = round(capital * 0.03, 2)
+            name_fields, bank_fields, rows = [], [], []
+            for i in range(num_tables):
+                nf = ft.TextField(
+                    value=f"TABLE {i + 1}",
+                    bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
+                    expand=2,
+                )
+                bf = ft.TextField(
+                    value=str(bank_per_table),
+                    bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
+                    keyboard_type=ft.KeyboardType.NUMBER, expand=1,
+                )
+                name_fields.append(nf)
+                bank_fields.append(bf)
+                rows.append(ft.Row(controls=[nf, bf], spacing=6))
 
-        def on_create(ev):
-            tables_data = []
-            for nf, bf in zip(name_fields, bank_fields):
-                t_name = nf.value.strip().upper() or f"TABLE {len(tables_data) + 1}"
-                try:
-                    t_bank = float(bf.value or bank_per_table)
-                except Exception:
-                    t_bank = bank_per_table
-                tables_data.append((t_name, t_bank))
-            self._create_investment(inv_name, capital, tables_data)
+            def on_create_fiat(_):
+                tables_data = []
+                for nf, bf in zip(name_fields, bank_fields):
+                    t_name = nf.value.strip().upper() or f"TABLE {len(tables_data) + 1}"
+                    try:
+                        t_bank = float(bf.value or bank_per_table)
+                    except Exception:
+                        t_bank = bank_per_table
+                    tables_data.append((t_name, t_bank))
+                self._create_investment(inv_name, capital, tables_data, 'FIAT')
 
-        controls = [
-            ft.ElevatedButton(
-                "←  BACK", on_click=self.show_new_investment_form,
-                style=ft.ButtonStyle(bgcolor='#c0392b', color=ft.Colors.WHITE),
-            ),
-            ft.Container(height=12),
-            ft.Text(f"{inv_name}  |  Capital: ${capital:.2f}", color='#3498db',
-                    size=16, weight=ft.FontWeight.BOLD),
-            ft.Container(height=4),
-            ft.Row(controls=[
-                ft.Text("TABLE NAME", color='#7f8c8d', size=12, expand=2),
-                ft.Text("BANK", color='#7f8c8d', size=12, expand=1),
-            ]),
-            ft.Container(height=4),
-        ] + rows + [
-            ft.Container(height=20),
-            ft.ElevatedButton(
-                "CREATE INVESTMENT", on_click=on_create,
-                height=60, expand=True,
-                style=ft.ButtonStyle(bgcolor='#27ae60', color=ft.Colors.WHITE),
-            ),
-        ]
+            controls = [
+                ft.ElevatedButton(
+                    "←  BACK", on_click=self.show_new_investment_form,
+                    style=ft.ButtonStyle(bgcolor='#c0392b', color=ft.Colors.WHITE),
+                ),
+                ft.Container(height=12),
+                ft.Text(f"{inv_name}  |  Capital: ${capital:.2f}", color='#3498db',
+                        size=16, weight=ft.FontWeight.BOLD),
+                ft.Container(height=4),
+                ft.Row(controls=[
+                    ft.Text("TABLE NAME", color='#7f8c8d', size=12, expand=2),
+                    ft.Text("BANK ($)", color='#7f8c8d', size=12, expand=1),
+                ]),
+                ft.Container(height=4),
+            ] + rows + [
+                ft.Container(height=20),
+                ft.ElevatedButton(
+                    "CREATE INVESTMENT", on_click=on_create_fiat,
+                    height=60, expand=True,
+                    style=ft.ButtonStyle(bgcolor='#27ae60', color=ft.Colors.WHITE),
+                ),
+            ]
+
+        # ── CHIPS MODE ─────────────────────────────────────────────
+        else:
+            # Each entry: (name_f, bal_f, price_f, cc_f, ct_f, chip_lbl)
+            chip_rows_refs = []
+            rows = []
+
+            dd_options = [
+                ft.dropdown.Option(key=sym, text=lbl)
+                for sym, lbl, _ in self._TOKENS
+            ]
+
+            _tf_dark = dict(bgcolor='#3a3a3a', color=ft.Colors.WHITE,
+                            label_style=ft.TextStyle(color='#aaaaaa'))
+
+            for i in range(num_tables):
+                token_dd = ft.Dropdown(
+                    options=dd_options,
+                    value='SOL',
+                    expand=True,
+                    bgcolor='#3a3a3a',
+                    color=ft.Colors.WHITE,
+                    border_color='#555555',
+                    focused_border_color='#f39c12',
+                    text_style=ft.TextStyle(color=ft.Colors.WHITE, size=14),
+                    hint_style=ft.TextStyle(color='#aaaaaa'),
+                )
+                bal_f = ft.TextField(
+                    value="0", label="Token balance",
+                    height=45, keyboard_type=ft.KeyboardType.NUMBER,
+                    **_tf_dark,
+                )
+                price_f = ft.TextField(
+                    value="0", label="Price (USD)  –  editable",
+                    height=45, keyboard_type=ft.KeyboardType.NUMBER,
+                    expand=True, **_tf_dark,
+                )
+                cc_f = ft.TextField(
+                    value="10", label="Credits",
+                    height=45, keyboard_type=ft.KeyboardType.NUMBER,
+                    expand=1, **_tf_dark,
+                )
+                ct_f = ft.TextField(
+                    value="0.0004", label="= tokens",
+                    height=45, keyboard_type=ft.KeyboardType.NUMBER,
+                    expand=1, **_tf_dark,
+                )
+                chip_lbl   = ft.Text("0 chips  |  $0.00", color='#f1c40f',
+                                     size=13, weight=ft.FontWeight.BOLD)
+                status_lbl = ft.Text("Select a token to fetch price",
+                                     color='#7f8c8d', size=11)
+
+                def _make_updater(bf, pf, ccf, ctf, clbl):
+                    def update(_=None):
+                        try:
+                            bal   = float(bf.value  or 0)
+                            price = float(pf.value  or 0)
+                            cc    = float(ccf.value or 10)
+                            ct    = float(ctf.value or 0.0004)
+                            cpt   = cc / ct if ct > 0 else 0
+                            chips = int(bal * cpt)
+                            usd   = bal * price
+                            clbl.value = f"{chips:,} chips  |  ${usd:,.2f}"
+                        except Exception:
+                            clbl.value = "—"
+                        try:
+                            clbl.update()
+                        except Exception:
+                            pass
+                    return update
+
+                upd = _make_updater(bal_f, price_f, cc_f, ct_f, chip_lbl)
+                bal_f.on_change   = upd
+                price_f.on_change = upd
+                cc_f.on_change    = upd
+                ct_f.on_change    = upd
+
+                def _make_fetch_handler(dd, pf, slbl, upd_fn):
+                    async def _do_fetch():
+                        sym = dd.value or 'SOL'
+                        slbl.value = f"Fetching {sym}…"
+                        self.page.update()
+                        price = await self._fetch_token_price(sym)
+                        if price > 0:
+                            pf.value   = str(price)
+                            slbl.value = f"✓  {sym}  =  ${price:,.4f}"
+                        else:
+                            slbl.value = "Could not fetch — enter price manually"
+                        self.page.update()
+                        upd_fn()
+
+                    def trigger(_):
+                        self.page.run_task(_do_fetch)
+
+                    return trigger
+
+                fetch_handler = _make_fetch_handler(token_dd, price_f, status_lbl, upd)
+                token_dd.on_change = fetch_handler
+
+                fetch_btn = ft.ElevatedButton(
+                    "GET PRICE", on_click=fetch_handler,
+                    height=45, width=110,
+                    style=ft.ButtonStyle(bgcolor='#2980b9', color=ft.Colors.WHITE),
+                )
+
+                chip_rows_refs.append((token_dd, bal_f, price_f, cc_f, ct_f))
+                rows.append(ft.Container(
+                    bgcolor='#222222', border_radius=8, padding=10,
+                    margin=ft.margin.only(bottom=8),
+                    content=ft.Column(spacing=6, controls=[
+                        ft.Text(f"TABLE {i + 1}", color='#7f8c8d', size=11),
+                        token_dd,
+                        status_lbl,
+                        bal_f,
+                        ft.Row(controls=[price_f, fetch_btn], spacing=6),
+                        ft.Text("Conversion  (credits = tokens)",
+                                color='#7f8c8d', size=11),
+                        ft.Row(controls=[cc_f, ct_f], spacing=6),
+                        chip_lbl,
+                    ]),
+                ))
+
+            def on_create_chips(_):
+                tables_data = []
+                total_usd   = 0.0
+                for idx, (dd, bf, pf, ccf, ctf) in enumerate(chip_rows_refs):
+                    t_name = dd.value or f"TABLE {idx + 1}"
+                    try:
+                        bal   = float(bf.value  or 0)
+                        price = float(pf.value  or 0)
+                        cc    = float(ccf.value or 10)
+                        ct    = float(ctf.value or 0.0004)
+                        cpt   = cc / ct if ct > 0 else 0
+                        chips = round(bal * cpt, 2)
+                    except Exception:
+                        bal = price = cpt = chips = 0.0
+                    tables_data.append((t_name, chips, t_name, bal, price, cpt))
+                    total_usd += bal * price
+                self._create_investment(inv_name, total_usd, tables_data, 'CHIPS')
+
+            controls = [
+                ft.ElevatedButton(
+                    "←  BACK", on_click=self.show_new_investment_form,
+                    style=ft.ButtonStyle(bgcolor='#c0392b', color=ft.Colors.WHITE),
+                ),
+                ft.Container(height=12),
+                ft.Text(f"{inv_name}  ·  CHIPS", color='#f39c12',
+                        size=16, weight=ft.FontWeight.BOLD),
+                ft.Text("Enter token balance + conversion for each table.",
+                        color='#7f8c8d', size=12),
+                ft.Container(height=8),
+            ] + rows + [
+                ft.Container(height=20),
+                ft.ElevatedButton(
+                    "CREATE INVESTMENT", on_click=on_create_chips,
+                    height=60, expand=True,
+                    style=ft.ButtonStyle(bgcolor='#f39c12', color=ft.Colors.WHITE),
+                ),
+            ]
 
         self._set_view(
             ft.Container(
@@ -642,23 +918,38 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     # SAVE INVESTMENT TO DB
     # ──────────────────────────────────────────────────────────────────
-    def _create_investment(self, inv_name: str, capital: float, tables_data: list):
+    def _create_investment(self, inv_name: str, capital: float, tables_data: list,
+                           inv_type: str = 'FIAT'):
         conn = self._get_conn()
         inv_id = None
         if conn:
             try:
                 fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
                 cursor = conn.execute(
-                    "INSERT INTO investments (name, capital, created_at) VALUES (?, ?, ?)",
-                    (inv_name, round(capital, 2), fecha)
+                    "INSERT INTO investments (name, capital, created_at, inv_type) "
+                    "VALUES (?, ?, ?, ?)",
+                    (inv_name, round(capital, 2), fecha, inv_type)
                 )
                 inv_id = cursor.lastrowid
-                for mesa_name, init_bank in tables_data:
-                    conn.execute(
-                        "INSERT INTO investment_tables "
-                        "(investment_id, mesa_name, init_bank) VALUES (?, ?, ?)",
-                        (inv_id, mesa_name, round(init_bank, 2))
-                    )
+                if inv_type == 'CHIPS':
+                    for (mesa_name, chip_bal, token_sym,
+                         token_bal, token_price, chips_per_tok) in tables_data:
+                        conn.execute(
+                            "INSERT INTO investment_tables "
+                            "(investment_id, mesa_name, init_bank, "
+                            " token_symbol, token_balance, token_price, chips_per_token) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (inv_id, mesa_name, round(chip_bal, 2),
+                             token_sym, token_bal, token_price,
+                             round(chips_per_tok, 6))
+                        )
+                else:
+                    for mesa_name, init_bank in tables_data:
+                        conn.execute(
+                            "INSERT INTO investment_tables "
+                            "(investment_id, mesa_name, init_bank) VALUES (?, ?, ?)",
+                            (inv_id, mesa_name, round(init_bank, 2))
+                        )
                 conn.commit()
             except Exception:
                 pass
@@ -683,23 +974,31 @@ class LinupApp:
             try:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT name, capital FROM investments WHERE id=?",
+                    "SELECT name, capital, inv_type FROM investments WHERE id=?",
                     (investment_id,)
                 )
                 row = cursor.fetchone()
+                db_inv_type = 'FIAT'
                 if row:
-                    inv_name, inv_capital = row
+                    inv_name, inv_capital, db_inv_type = row[0], row[1], (row[2] or 'FIAT')
 
                 cursor.execute(
-                    "SELECT mesa_name, init_bank FROM investment_tables "
+                    "SELECT mesa_name, init_bank, token_price, chips_per_token "
+                    "FROM investment_tables "
                     "WHERE investment_id=? ORDER BY id",
                     (investment_id,)
                 )
                 inv_tables = cursor.fetchall()
 
+                # usd_per_chip for each mesa (used for CHIPS display)
+                mesa_chip_rate = {
+                    row[0]: ((row[2] / row[3]) if row[3] and row[3] > 0 else 0.0)
+                    for row in inv_tables
+                }
+
                 # Collect all table data first so we can compute per-table other_pl
                 all_tdata = []  # (mesa_name, init_bank, wins, losses, last_bank)
-                for mesa_name, init_bank in inv_tables:
+                for mesa_name, init_bank, _tp, _cpt in inv_tables:
                     cursor.execute(
                         "SELECT wins, losses, last_bank FROM table_stats "
                         "WHERE investment_id=? AND mesa=?",
@@ -724,19 +1023,25 @@ class LinupApp:
                     total = wins + losses
                     eff   = (wins / total * 100) if total > 0 else 0.0
                     color = '#2ecc71' if (total == 0 or eff >= 50) else '#ff4444'
-                    if total == 0:
-                        txt = f"{mesa_name}  |  ${last_bank:.2f}  |  New"
+                    if db_inv_type == 'CHIPS':
+                        usd_val = last_bank * mesa_chip_rate.get(mesa_name, 0.0)
+                        bk_fmt = f"{int(round(last_bank)):,} (${usd_val:.2f})"
                     else:
-                        txt = (f"{mesa_name}  |  ${last_bank:.2f}"
+                        bk_fmt = f"${last_bank:.2f}"
+                    if total == 0:
+                        txt = f"{mesa_name}  |  {bk_fmt}  |  New"
+                    else:
+                        txt = (f"{mesa_name}  |  {bk_fmt}"
                                f"  |  W:{wins} L:{losses}  |  {eff:.0f}%")
 
-                    def make_loader(m, bk, has_hist, opl):
+                    def make_loader(m, bk, has_hist, opl, itype=db_inv_type):
                         def loader(ev):
                             self.reset_variables()
                             self.current_investment_id = investment_id
                             self.inv_name      = inv_name
                             self.inv_capital   = float(inv_capital)
                             self.inv_other_pl  = opl
+                            self.inv_type      = itype
                             self.nombre_mesa   = str(m)
                             self.banca_inicial = float(bk)
                             self.banca_actual  = float(bk)
@@ -766,7 +1071,10 @@ class LinupApp:
                         bgcolor='#1e2d1e' if total_pl >= 0 else '#2d1e1e',
                         padding=10, margin=ft.margin.only(bottom=4),
                         content=ft.Text(
-                            f"{eff_txt}${total_bank:.2f}  |  P/L: {pl_sign}${total_pl:.2f} ({pl_sign}{pl_pct:.1f}%)",
+                            f"{eff_txt}"
+                            + (f"{int(round(total_bank)):,}  |  P/L: {pl_sign}{int(round(total_pl)):,} ({pl_sign}{pl_pct:.1f}%)"
+                               if db_inv_type == 'CHIPS'
+                               else f"${total_bank:.2f}  |  P/L: {pl_sign}${total_pl:.2f} ({pl_sign}{pl_pct:.1f}%)"),
                             color=tc, size=13, weight=ft.FontWeight.BOLD,
                             text_align=ft.TextAlign.CENTER,
                         ),
@@ -774,10 +1082,23 @@ class LinupApp:
 
                 # ── Actual saved sessions (primary view) ───────────────
                 num_sessions = total_wins + total_losses
+
+                # For CHIPS: initial USD capital + USD P/L from mesa rates
+                total_usd_cap = sum(
+                    d[1] * mesa_chip_rate.get(d[0], 0.0) for d in all_tdata
+                ) if db_inv_type == 'CHIPS' else float(inv_capital)
+                total_usd_pl = sum(
+                    (d[4] - d[1]) * mesa_chip_rate.get(d[0], 0.0) for d in all_tdata
+                ) if db_inv_type == 'CHIPS' else total_pl
+
+                proj_capital = total_usd_cap if db_inv_type == 'CHIPS' else float(inv_capital)
                 per_session_rate = (
-                    (total_pl / float(inv_capital) / num_sessions)
-                    if (num_sessions > 0 and float(inv_capital) > 0) else 0.0
+                    (total_usd_pl / proj_capital / num_sessions)
+                    if (num_sessions > 0 and proj_capital > 0) else 0.0
                 )
+
+                # mesa_usd_rate reuses mesa_chip_rate (same data, already fetched)
+                mesa_usd_rate = mesa_chip_rate
 
                 cursor.execute(
                     "SELECT session_num, date, mesa, profit, profit_pct "
@@ -792,11 +1113,19 @@ class LinupApp:
                             text_align=ft.TextAlign.CENTER),
                 ]
                 if saved_sessions:
-                    running = float(inv_capital)
+                    # CHIPS: running total in USD; FIAT: running total in dollars
+                    running = total_usd_cap if db_inv_type == 'CHIPS' else float(inv_capital)
                     for s_num, s_date, s_mesa, s_profit, s_pct in saved_sessions:
-                        running += s_profit
-                        sign = "+" if s_profit >= 0 else ""
-                        col  = '#2ecc71' if s_profit >= 0 else '#ff4444'
+                        if db_inv_type == 'CHIPS':
+                            disp = s_profit * mesa_usd_rate.get(s_mesa, 0.0)
+                        else:
+                            disp = s_profit
+                        running += disp
+                        sign = "+" if disp >= 0 else ""
+                        col  = '#2ecc71' if disp >= 0 else '#ff4444'
+                        chip_pfx = (f"{'+' if s_profit >= 0 else ''}"
+                                    f"{int(round(s_profit)):,}  "
+                                    if db_inv_type == 'CHIPS' else "")
                         session_rows.append(
                             ft.Container(
                                 bgcolor='#1a1a2e', border_radius=4,
@@ -807,14 +1136,15 @@ class LinupApp:
                                             size=10, width=90),
                                     ft.Text(s_mesa, color=ft.Colors.WHITE,
                                             size=10, expand=True),
-                                    ft.Text(f"{sign}${s_profit:.2f} ({sign}{s_pct:.1f}%)",
+                                    ft.Text(f"{chip_pfx}{sign}${disp:.2f} ({sign}{s_pct:.1f}%)",
                                             color=col, size=10,
                                             weight=ft.FontWeight.BOLD),
                                 ], spacing=6),
                             )
                         )
-                    run_col  = '#2ecc71' if running >= float(inv_capital) else '#ff4444'
-                    run_diff = running - float(inv_capital)
+                    run_base = total_usd_cap if db_inv_type == 'CHIPS' else float(inv_capital)
+                    run_col  = '#2ecc71' if running >= run_base else '#ff4444'
+                    run_diff = running - run_base
                     run_sign = "+" if run_diff >= 0 else ""
                     session_rows.append(
                         ft.Container(
@@ -838,21 +1168,40 @@ class LinupApp:
                 table_rows.append(ft.Container(
                     bgcolor='#111111', border_radius=6,
                     padding=8, margin=ft.margin.only(top=10),
-                    content=ft.Column(controls=session_rows, spacing=2),
+                    height=300,
+                    content=ft.Column(controls=session_rows, spacing=2, scroll=ft.ScrollMode.AUTO),
                 ))
 
-                # ── Compound growth projection button ──────────────────
-                def _open_projection(_ev, r=per_session_rate, c=float(inv_capital),
-                                     n=inv_name, iid=investment_id, e=te):
-                    self.show_compound_custom_view(iid, n, c, r, e)
+                # ── Bottom action buttons ───────────────────────────────
+                def _open_projection(_ev, r=per_session_rate, c=proj_capital,
+                                     n=inv_name, iid=investment_id, e=te, it='FIAT'):
+                    self.show_compound_custom_view(iid, n, c, r, e, it)
+
+                def _open_graph(_, c=float(inv_capital),
+                                n=inv_name, iid=investment_id, it=db_inv_type,
+                                mur=dict(mesa_usd_rate), uc=total_usd_cap):
+                    self.show_actual_graph_view(iid, n, c, it, mur, uc)
 
                 table_rows.append(ft.Container(height=6))
                 table_rows.append(
-                    ft.ElevatedButton(
-                        "COMPOUND GROWTH",
-                        on_click=_open_projection,
-                        height=45, expand=True,
-                        style=ft.ButtonStyle(bgcolor='#2980b9', color=ft.Colors.WHITE),
+                    ft.Row(
+                        controls=[
+                            ft.ElevatedButton(
+                                "COMPOUND GROWTH",
+                                on_click=_open_projection,
+                                expand=True, height=45,
+                                style=ft.ButtonStyle(bgcolor='#2980b9',
+                                                     color=ft.Colors.WHITE),
+                            ),
+                            ft.ElevatedButton(
+                                "ACTUAL GRAPH",
+                                on_click=_open_graph,
+                                expand=True, height=45,
+                                style=ft.ButtonStyle(bgcolor='#6c3483',
+                                                     color=ft.Colors.WHITE),
+                            ),
+                        ],
+                        spacing=8,
                     )
                 )
 
@@ -901,7 +1250,8 @@ class LinupApp:
     # COMPOUND INTEREST WIDGET
     # ──────────────────────────────────────────────────────────────────
     def _build_compound_widget(self, periods: int, start_capital: float,
-                               rate: float, efficiency: float = 0.0):
+                               rate: float, efficiency: float = 0.0,
+                               inv_type: str = 'FIAT'):
         # efficiency: 0–100 (e.g. 70 → 70 % win rate)
         eff      = max(0.0, min(100.0, efficiency)) / 100.0
         denom    = 2 * eff - 1
@@ -961,13 +1311,18 @@ class LinupApp:
             _cell("TOT%",    '#7f8c8d', 1, bold=True),
         ], spacing=3)
 
+        def _fv(v):  # format capital/gain value
+            if inv_type == 'CHIPS':
+                return f"{int(round(v)):,}"
+            return f"${v:.2f}"
+
         # Day 0 — starting capital
         data_rows = [ft.Row([
-            _cell("0",                     '#7f8c8d', 1),
-            _cell("—",                     '#7f8c8d', 1),
-            _cell(f"${start_capital:.2f}", ft.Colors.WHITE, 2),
-            _cell("—",                     '#7f8c8d', 2),
-            _cell("0.0%",                  '#7f8c8d', 1),
+            _cell("0",                  '#7f8c8d', 1),
+            _cell("—",                  '#7f8c8d', 1),
+            _cell(_fv(start_capital),   ft.Colors.WHITE, 2),
+            _cell("—",                  '#7f8c8d', 2),
+            _cell("0.0%",               '#7f8c8d', 1),
         ], spacing=3)]
 
         cap = start_capital
@@ -979,16 +1334,16 @@ class LinupApp:
             total_pct  = (total_gain / start_capital * 100) if start_capital > 0 else 0.0
             cap     = new_cap
 
-            gain_txt = f"{'+' if gain >= 0 else ''}{gain:.2f}"
+            gain_txt = f"{'+' if gain >= 0 else ''}{_fv(gain)}"
             pct_txt  = f"{'+' if total_pct >= 0 else ''}{total_pct:.1f}%"
 
             gain_cell = _cell(gain_txt, '#2ecc71', 2) if win else _red_cell(gain_txt, 2)
             pct_cell  = _cell(pct_txt,  '#2ecc71', 1) if win else _red_cell(pct_txt,  1)
 
             data_rows.append(ft.Row([
-                _cell(str(i),            ft.Colors.WHITE, 1),
+                _cell(str(i),       ft.Colors.WHITE, 1),
                 _badge(result, win),
-                _cell(f"${new_cap:.2f}", ft.Colors.WHITE, 2),
+                _cell(_fv(new_cap), ft.Colors.WHITE, 2),
                 gain_cell,
                 pct_cell,
             ], spacing=3))
@@ -1019,7 +1374,8 @@ class LinupApp:
     # COMPOUND INTEREST — CUSTOM PERIOD VIEW
     # ──────────────────────────────────────────────────────────────────
     def show_compound_custom_view(self, investment_id, inv_name: str,
-                                  inv_capital: float, rate: float, efficiency: float = 0.0):
+                                  inv_capital: float, rate: float, efficiency: float = 0.0,
+                                  inv_type: str = 'FIAT'):
         periods_field = ft.TextField(
             value="30",
             bgcolor=ft.Colors.WHITE, color=ft.Colors.BLACK, height=45,
@@ -1033,7 +1389,7 @@ class LinupApp:
                 p = max(1, min(730, int(periods_field.value or 30)))
             except Exception:
                 p = 30
-            result_col.controls = [self._build_compound_widget(p, inv_capital, rate, efficiency)]
+            result_col.controls = [self._build_compound_widget(p, inv_capital, rate, efficiency, inv_type)]
             result_col.update()
 
         def go_back(ev):
@@ -1056,6 +1412,8 @@ class LinupApp:
                             color='#3498db', size=14, weight=ft.FontWeight.BOLD,
                         ),
                         ft.Text(
+                            f"Base: {int(round(inv_capital)):,}  |  Rate: {rate * 100:+.2f}% / session"
+                            if inv_type == 'CHIPS' else
                             f"Base: ${inv_capital:.2f}  |  Rate: {rate * 100:+.2f}% / session",
                             color='#7f8c8d', size=12,
                         ),
@@ -1076,6 +1434,226 @@ class LinupApp:
             )
         )
         generate()   # auto-generate on open
+
+    # ──────────────────────────────────────────────────────────────────
+    # ACTUAL GROWTH GRAPH
+    # ──────────────────────────────────────────────────────────────────
+    def show_actual_graph_view(self, investment_id: int, inv_name: str,
+                               inv_capital: float, inv_type: str = 'FIAT',
+                               mesa_usd_rate: dict = None, usd_capital: float = 0.0):
+        import flet.canvas as cv, inspect
+        # cv.Text uses 'value' in Flet ≥0.83, 'text' in older versions
+        _tv = ('value' if 'value' in inspect.signature(cv.Text.__init__).parameters
+               else 'text')
+
+        def _cv_text(x, y, txt, color='#888888', size=8):
+            return cv.Text(x=x, y=y,
+                           style=ft.TextStyle(color=color, size=size),
+                           **{_tv: str(txt)})
+
+        sessions = []  # list of (profit, mesa)
+        conn = self._get_conn()
+        if conn:
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT profit, mesa FROM compound_sessions "
+                    "WHERE investment_id=? ORDER BY id",
+                    (investment_id,)
+                )
+                sessions = cursor.fetchall()
+            except Exception:
+                pass
+            finally:
+                conn.close()
+
+        if mesa_usd_rate is None:
+            mesa_usd_rate = {}
+
+        chips_mode = inv_type == 'CHIPS'
+
+        def go_back(ev):
+            self.show_investment_dashboard(investment_id)
+
+        # Always display in USD for the graph
+        def _fv(v):
+            return f"${v:.2f}"
+
+        # Build (x, y) pairs — point 0 is starting capital
+        start_y = usd_capital if chips_mode else float(inv_capital)
+        pts = [(0, start_y)]
+        running = start_y
+        for profit, mesa in sessions:
+            delta = (profit * mesa_usd_rate.get(mesa, 0.0)) if chips_mode else profit
+            running += delta
+            pts.append((len(pts), running))
+
+        controls: list = [
+            ft.ElevatedButton(
+                "←  BACK", on_click=go_back,
+                style=ft.ButtonStyle(bgcolor='#c0392b', color=ft.Colors.WHITE),
+            ),
+            ft.Container(height=12),
+            ft.Text(f"{inv_name}  —  ACTUAL GROWTH",
+                    color='#3498db', size=14, weight=ft.FontWeight.BOLD),
+            ft.Text(f"Start: {_fv(start_y)}  ·  {len(sessions)} sessions",
+                    color='#7f8c8d', size=12),
+            ft.Container(height=10),
+        ]
+
+        if len(pts) < 2:
+            controls.append(
+                ft.Text("No sessions saved yet — play and save sessions first.",
+                        color='#7f8c8d', size=12,
+                        text_align=ft.TextAlign.CENTER)
+            )
+        else:
+            yvals  = [p[1] for p in pts]
+            data_range = max(max(yvals) - min(yvals), abs(inv_capital * 0.01), 1.0)
+            mid    = (max(yvals) + min(yvals)) / 2
+            half   = data_range * 1.5 / 2
+            min_y  = mid - half
+            max_y  = mid + half
+            y_span = max_y - min_y
+            max_xi = len(pts) - 1
+            line_color = '#2ecc71' if running >= inv_capital else '#ff4444'
+
+            # Canvas layout constants (px)
+            ML, MR, MT, MB = 62, 8, 8, 22
+            CH = 270  # total canvas height
+
+            def _build_shapes(cw):
+                pw = max(cw - ML - MR, 1.0)
+                ph = float(CH - MT - MB)
+
+                def sx(xi): return ML + (xi / max_xi) * pw if max_xi else ML
+                def sy(yv): return MT + (1.0 - (yv - min_y) / y_span) * ph
+
+                shapes = []
+
+                # Background
+                shapes.append(cv.Rect(
+                    x=ML, y=MT, width=pw, height=ph,
+                    paint=ft.Paint(color='#1a2535',
+                                   style=ft.PaintingStyle.FILL)
+                ))
+
+                # Horizontal grid lines + Y labels
+                for i in range(5):
+                    gy  = MT + i * ph / 4
+                    val = max_y - i * y_span / 4
+                    shapes.append(cv.Line(
+                        x1=ML, y1=gy, x2=ML + pw, y2=gy,
+                        paint=ft.Paint(color='#2a2a2a', stroke_width=1)
+                    ))
+                    shapes.append(_cv_text(0, gy - 6, _fv(val)))
+
+                # Break-even dashed line
+                bey = sy(inv_capital)
+                if MT <= bey <= MT + ph:
+                    x = ML
+                    while x < ML + pw:
+                        shapes.append(cv.Line(
+                            x1=x, y1=bey,
+                            x2=min(x + 4, ML + pw), y2=bey,
+                            paint=ft.Paint(color='#666666', stroke_width=1)
+                        ))
+                        x += 8
+
+                # Fill under data line
+                fill = [cv.Path.MoveTo(x=sx(pts[0][0]), y=sy(pts[0][1]))]
+                for xi, yi in pts[1:]:
+                    fill.append(cv.Path.LineTo(x=sx(xi), y=sy(yi)))
+                fill.append(cv.Path.LineTo(x=sx(pts[-1][0]), y=MT + ph))
+                fill.append(cv.Path.LineTo(x=sx(0), y=MT + ph))
+                fill.append(cv.Path.Close())
+                shapes.append(cv.Path(
+                    elements=fill,
+                    paint=ft.Paint(color=line_color + '33',
+                                   style=ft.PaintingStyle.FILL)
+                ))
+
+                # Data line
+                line = [cv.Path.MoveTo(x=sx(pts[0][0]), y=sy(pts[0][1]))]
+                for xi, yi in pts[1:]:
+                    line.append(cv.Path.LineTo(x=sx(xi), y=sy(yi)))
+                shapes.append(cv.Path(
+                    elements=line,
+                    paint=ft.Paint(color=line_color, stroke_width=2,
+                                   style=ft.PaintingStyle.STROKE)
+                ))
+
+                # Dots (only when few sessions)
+                if len(pts) <= 25:
+                    for xi, yi in pts:
+                        shapes.append(cv.Circle(
+                            x=sx(xi), y=sy(yi), radius=3,
+                            paint=ft.Paint(color=line_color,
+                                           style=ft.PaintingStyle.FILL)
+                        ))
+
+                # X-axis labels
+                x_step = max(1, round(max_xi / 5))
+                for i in range(0, len(pts), x_step):
+                    shapes.append(_cv_text(sx(i) - 4, MT + ph + 4, str(i)))
+
+                # Axes border
+                shapes.append(cv.Line(
+                    x1=ML, y1=MT, x2=ML, y2=MT + ph,
+                    paint=ft.Paint(color='#444444', stroke_width=1)
+                ))
+                shapes.append(cv.Line(
+                    x1=ML, y1=MT + ph, x2=ML + pw, y2=MT + ph,
+                    paint=ft.Paint(color='#444444', stroke_width=1)
+                ))
+
+                return shapes
+
+            canvas_ctrl = cv.Canvas(
+                shapes=[],
+                expand=True,
+                height=CH,
+                resize_interval=0,
+                on_resize=lambda e: (
+                    setattr(canvas_ctrl, 'shapes', _build_shapes(e.width))
+                    or canvas_ctrl.update()
+                ),
+            )
+
+            controls.append(
+                ft.Container(
+                    bgcolor='#0d0d0d', border_radius=8,
+                    padding=0,
+                    content=canvas_ctrl,
+                    height=CH,
+                )
+            )
+
+            # Summary bar
+            final_pl = running - start_y
+            pl_pct   = (final_pl / start_y * 100) if start_y else 0
+            pl_sign  = "+" if final_pl >= 0 else ""
+            pl_col   = '#2ecc71' if final_pl >= 0 else '#ff4444'
+            controls += [
+                ft.Container(height=10),
+                ft.Container(
+                    bgcolor='#1e2d1e' if final_pl >= 0 else '#2d1e1e',
+                    padding=10, border_radius=6,
+                    content=ft.Text(
+                        f"Current: {_fv(running)}  |  "
+                        f"P/L: {pl_sign}{_fv(final_pl)} ({pl_sign}{pl_pct:.1f}%)",
+                        color=pl_col, size=13, weight=ft.FontWeight.BOLD,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ),
+            ]
+
+        self._set_view(
+            ft.Container(
+                bgcolor='#1a1a1a', expand=True, padding=20,
+                content=ft.ListView(expand=True, controls=controls),
+            )
+        )
 
     # ──────────────────────────────────────────────────────────────────
     # LOAD INVESTMENT
@@ -1359,8 +1937,16 @@ class LinupApp:
         )
         sug_bank     = self.banca_actual
         sug_max_loss = 33.0    # default: 3 losses = 33% bank
-        sug_fin      = round(sug_bank * (sug_max_loss / 100) / 225, 6)
-        sug_fout     = round(sug_bank * (sug_max_loss / 100) / 26,  4)
+
+        def _round_up_chip(val):
+            if val <= 0:
+                return 0.0
+            if val < 10:
+                return math.floor(round(val * 10, 8)) / 10
+            return float(math.floor(val / 10) * 10)
+
+        sug_fin  = _round_up_chip(sug_bank * (sug_max_loss / 100) / 225)
+        sug_fout = sug_fin * 10
 
         def _f(val):
             try:
@@ -1371,7 +1957,8 @@ class LinupApp:
         def _chips_from(bk, loss_pct):
             """Return (fin, fout) given bank and max-loss %."""
             factor = bk * max(loss_pct, 0) / 100
-            return round(factor / 225, 6), round(factor / 26, 4)
+            fin = _round_up_chip(factor / 225)
+            return fin, fin * 10
 
         def _chip_label_text(chip_val, bank, multiplier_sum, max_loss_pct):
             """chip_val × multiplier_sum = total 3-loss cost; % relative to bank"""
@@ -1523,6 +2110,9 @@ class LinupApp:
                                      value=vc['wave'],
                                      fill_color=C_WAV, check_color=ft.Colors.WHITE,
                                      label_style=ft.TextStyle(color=ft.Colors.WHITE, size=13))
+        self.cb_filters = ft.Checkbox(label="Filters  (R B Even Odd 1-18 19-36)", value=vc.get('filters', True),
+                                      fill_color='#FF6B00', check_color=ft.Colors.WHITE,
+                                      label_style=ft.TextStyle(color=ft.Colors.WHITE, size=13))
 
         btn_txt = "RESUME TABLE" if is_continue else "OPEN TABLE"
         self._set_view(
@@ -1560,6 +2150,7 @@ class LinupApp:
                         self.cb_secs,
                         self.cb_thirds,
                         self.cb_wave,
+                        self.cb_filters,
                         ft.Container(height=6),
                         ft.ElevatedButton(
                             btn_txt, on_click=self.iniciar_ciclo,
@@ -1593,6 +2184,7 @@ class LinupApp:
                 'secs':   bool(self.cb_secs.value),
                 'thirds': bool(self.cb_thirds.value),
                 'wave':   bool(self.cb_wave.value),
+                'filters': bool(self.cb_filters.value),
             }
         except Exception:
             pass
@@ -1641,13 +2233,13 @@ class LinupApp:
                 ft.Text("45% loss limit reached.", color='#ff4444',
                         size=13, text_align=ft.TextAlign.CENTER),
                 ft.Container(height=6),
-                ft.Text(f"Initial bank:  ${self.banca_inicial:.2f}",
+                ft.Text(f"Initial bank:  {self._fmt_bank(self.banca_inicial)}",
                         color=ft.Colors.WHITE, size=14),
-                ft.Text(f"Final bank:    ${self.banca_actual:.2f}",
+                ft.Text(f"Final bank:    {self._fmt_bank(self.banca_actual)}",
                         color=ft.Colors.WHITE, size=14),
                 ft.Container(height=8),
                 ft.Text(
-                    f"P/L:  ${profit:.2f}   ({pl_pct:.1f}%)",
+                    f"P/L:  {self._fmt_bank(profit)}   ({pl_pct:.1f}%)",
                     color='#ff4444', size=20, weight=ft.FontWeight.BOLD,
                 ),
                 ft.Container(height=10),
@@ -1703,13 +2295,13 @@ class LinupApp:
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             controls=[
                 ft.Divider(color='#444444'),
-                ft.Text(f"Initial bank:  ${self.banca_inicial:.2f}",
+                ft.Text(f"Initial bank:  {self._fmt_bank(self.banca_inicial)}",
                         color=ft.Colors.WHITE, size=14),
-                ft.Text(f"Final bank:    ${self.banca_actual:.2f}",
+                ft.Text(f"Final bank:    {self._fmt_bank(self.banca_actual)}",
                         color=ft.Colors.WHITE, size=14),
                 ft.Container(height=8),
                 ft.Text(
-                    f"P/L:  {signo}${profit:.2f}   ({signo}{pl_pct:.1f}%)",
+                    f"P/L:  {signo}{self._fmt_bank(profit)}   ({signo}{pl_pct:.1f}%)",
                     color=color, size=20, weight=ft.FontWeight.BOLD,
                 ),
                 ft.Container(height=10),
@@ -1763,7 +2355,7 @@ class LinupApp:
             self.lbl_inv_pl = None
 
         self.lbl_bank = ft.Text(
-            f"{self.nombre_mesa}  |  ${self.banca_actual:.2f}",
+            f"{self.nombre_mesa}  |  {self._fmt_bank(self.banca_actual)}",
             color='#2ecc71', weight=ft.FontWeight.BOLD, size=13, expand=True,
         )
         self.lbl_inv = ft.Text(
@@ -1786,14 +2378,19 @@ class LinupApp:
         self.prog_on     = True
         self.fixed_multi = 1
 
-        _PROG_ON_COLOR  = '#2ecc71'
-        _PROG_OFF_COLOR = '#e67e22'
-        _MULTI_ACT      = '#f39c12'
-        _MULTI_INACT    = '#3a3a3a'
+        _PROG_ON_COLOR    = '#2ecc71'     # green
+        _PROG_OFF_COLOR   = '#e67e22'     # orange
+        _SNIPER_ON_COLOR  = '#2ecc71'     # green (harmonized with prog ON)
+        _SNIPER_OFF_COLOR = '#e67e22'     # orange (harmonized with prog OFF)
+        _MULTI_ACT        = '#f39c12'
+        _MULTI_INACT      = '#3a3a3a'
 
-        _prog_lbl  = ft.Text("PROG: ON", color=ft.Colors.WHITE,
-                              weight=ft.FontWeight.BOLD, size=11)
-        _prog_ref  = [None]
+        _prog_lbl   = ft.Text("PROG: ON", color=ft.Colors.WHITE,
+                               weight=ft.FontWeight.BOLD, size=11)
+        _sniper_lbl = ft.Text("SNIPER: ON", color=ft.Colors.WHITE,
+                               weight=ft.FontWeight.BOLD, size=11)
+        _prog_ref   = [None]
+        _sniper_ref = [None]
         _multi_refs: dict = {}   # multiplier int → button ref
 
         def _refresh_prog_ui():
@@ -1826,6 +2423,20 @@ class LinupApp:
                 self.nivel_martingala_in  = 0
             _refresh_prog_ui()
 
+        def _toggle_sniper(_e):
+            self.sniper_mode = not self.sniper_mode
+            _sniper_lbl.value = "SNIPER: ON" if self.sniper_mode else "SNIPER: OFF"
+            _sniper_ref[0].style = ft.ButtonStyle(
+                bgcolor=_SNIPER_ON_COLOR if self.sniper_mode else _SNIPER_OFF_COLOR,
+                color=ft.Colors.WHITE,
+            )
+            _sniper_ref[0].update()
+            _sniper_lbl.update()
+            self._refresh_mixer_colors()
+            self.update_inv_label()
+            if self.lbl_inv:
+                self.lbl_inv.update()
+
         def _make_multi_handler(mx):
             def handler(_e):
                 self.fixed_multi = mx
@@ -1838,6 +2449,13 @@ class LinupApp:
             on_click=_toggle_prog,
         )
         _prog_ref[0] = _prog_btn
+
+        _sniper_btn = ft.ElevatedButton(
+            content=_sniper_lbl, height=30, expand=2,
+            style=ft.ButtonStyle(bgcolor=_SNIPER_ON_COLOR, color=ft.Colors.WHITE),
+            on_click=_toggle_sniper,
+        )
+        _sniper_ref[0] = _sniper_btn
 
         _multi_btn_list = []
         for _mx in (1, 2, 3, 4, 5):
@@ -1856,7 +2474,7 @@ class LinupApp:
 
         prog_bar = ft.Container(
             bgcolor='#161616', padding=ft.padding.symmetric(horizontal=4, vertical=3),
-            content=ft.Row(controls=[_prog_btn] + _multi_btn_list, spacing=3),
+            content=ft.Row(controls=[_prog_btn, _sniper_btn] + _multi_btn_list, spacing=3),
         )
         # ──────────────────────────────────────────────────────────────────
 
@@ -1927,10 +2545,6 @@ class LinupApp:
                 _all_filter_btns.append((opt, btn))
                 return btn
 
-            row1 = ft.Row(controls=[
-                _filter_btn('R', '■  RED',   height=38, size=12),
-                _filter_btn('B', '■  BLACK', height=38, size=12),
-            ], spacing=4)
             row2 = ft.Row(controls=[
                 _filter_btn('1-18',  '1-18',  height=28, size=9),
                 _filter_btn('Even',  'Even',  height=28, size=9),
@@ -1942,18 +2556,19 @@ class LinupApp:
             rb_bar = ft.Container(
                 bgcolor='#1a2a3a',
                 padding=ft.padding.symmetric(horizontal=6, vertical=4),
-                content=ft.Column(controls=[row1, row2], spacing=3),
+                content=ft.Column(controls=[row2], spacing=3),
             )
 
         self.mixer_btns = {}
         vc = self.visible_cats
         all_cats = [
-            ('cols',   ['34', '35', '36'],      C_COL),
-            ('docs',   ['1a', '2a', '3a'],      C_DOC),
-            ('secs',   ['Z0', 'ZG', 'ZP', 'H'], C_SEC),
-            ('thirds', ['T1', 'T2', 'T3'],      C_SET),
-            ('wave',   ['W1', 'W2', 'W3'],      C_WAV),
+            ('cols',   ['34', '35', '36'],               C_COL),
+            ('docs',   ['1a', '2a', '3a'],               C_DOC),
+            ('secs',   ['Z0', 'ZG', 'ZP', 'H'],          C_SEC),
+            ('thirds', ['T1', 'T2', 'T3'],               C_SET),
+            ('wave',   ['W1', 'W2', 'W3'],               C_WAV),
         ]
+        # Regular categories
         cats = [(grps, col) for key, grps, col in all_cats if vc.get(key, True)]
         mixer_rows = []
         for grps, col in cats:
@@ -1975,6 +2590,45 @@ class LinupApp:
                 self.mixer_btns[g] = btn
                 row_btns.append(btn)
             mixer_rows.append(ft.Row(controls=row_btns, spacing=2))
+        
+        # Filter buttons with roulette table layout and individual colors
+        if vc.get('filters', True):
+            # Color map for filter buttons
+            filter_colors = {
+                'R': '#cc0000',      # Red
+                'B': '#888888',      # Black - gray when not pressed
+                '1-18': '#888888',   # Gray
+                'Even': '#888888',   # Gray
+                'Odd': '#888888',    # Gray
+                '19-36': '#888888',  # Gray
+            }
+            # Roulette table layout: 1-18 | Even | Red | Black | Odd | 19-36
+            filter_order = ['1-18', 'Even', 'R', 'B', 'Odd', '19-36']
+            filter_row_btns = []
+            for g in filter_order:
+                btn_color = filter_colors[g]
+                # Use smaller text for longer labels to fit single line
+                text_size = 11 if g in ('1-18', '19-36') else 12
+                # For black button, use dark overlay to go really black when pressed
+                # For others, use light overlay
+                overlay = {
+                    ft.ControlState.PRESSED: ft.Colors.with_opacity(0.7, '#000000') if g == 'B'
+                                            else ft.Colors.with_opacity(0.4, ft.Colors.WHITE),
+                }
+                btn = ft.ElevatedButton(
+                    content=self._txt(g, size=text_size),
+                    data={'name': g, 'color': btn_color},
+                    on_click=self.seleccionar_mixer,
+                    expand=True, height=40,
+                    style=ft.ButtonStyle(
+                        bgcolor=btn_color, color=ft.Colors.WHITE,
+                        animation_duration=400,
+                        overlay_color=overlay,
+                    ),
+                )
+                self.mixer_btns[g] = btn
+                filter_row_btns.append(btn)
+            mixer_rows.append(ft.Row(controls=filter_row_btns, spacing=2))
 
         mixer_box = ft.Container(
             padding=ft.padding.symmetric(horizontal=2),
@@ -2050,18 +2704,19 @@ class LinupApp:
         )
 
         self.reg_header_row = ft.Row(controls=[], spacing=0)
-        self.reg_rows_box   = ft.Column(controls=[], spacing=0)
+        self.reg_rows_box   = ft.ListView(controls=[], spacing=0, scroll=ft.ScrollMode.AUTO)
         self._rebuild_table_header()
 
         bitacora = ft.Container(
             height=170, bgcolor='#0d0d0d',
-            content=ft.Row(
-                scroll=ft.ScrollMode.AUTO,
+            content=ft.Column(
+                spacing=0,
                 controls=[
-                    ft.Column(
-                        controls=[self.reg_header_row, self.reg_rows_box],
-                        spacing=0, tight=True,
-                    )
+                    self.reg_header_row,
+                    ft.Container(
+                        expand=True,
+                        content=self.reg_rows_box,
+                    ),
                 ],
             ),
         )
@@ -2092,7 +2747,7 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     def _table_specs(self):
         """Return list of (header, color) pairs based on visible_cats."""
-        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave']})
+        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave','filters']})
         W  = ft.Colors.WHITE
         specs = [("N", '#f1c40f')]
         if vc.get('basic',  True): specs += [("R",'#ff4d4d'),("N",W),("P",'#3498db'),("I",'#f39c12'),("B",W),("A",W)]
@@ -2101,6 +2756,7 @@ class LinupApp:
         if vc.get('secs',   True): specs += [("Z0",C_SEC),("ZG",C_SEC),("ZP",C_SEC),("H",C_SEC)]
         if vc.get('thirds', True): specs += [("T1",C_SET),("T2",C_SET),("T3",C_SET)]
         if vc.get('wave',   True): specs += [("W1",C_WAV),("W2",C_WAV),("W3",C_WAV)]
+        if vc.get('filters', True): specs += [("R",'#c0392b'),("B",'#222222'),("E",'#446644'),("O",'#664444'),("18",'#555577'),("36",'#445566')]
         return specs
 
     def _rebuild_table_header(self):
@@ -2119,10 +2775,10 @@ class LinupApp:
         cw = self._col_width()
         self._rebuild_table_header()
         self.reg_rows_box.controls.clear()
-        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave']})
+        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave','filters']})
         s  = "■"
         W  = ft.Colors.WHITE
-        for n in self.history_nums[-8:]:
+        for n in self.history_nums[-9:]:
             cells = [(str(n), '#f1c40f')]
             if vc.get('basic', True):
                 cells += [
@@ -2147,6 +2803,16 @@ class LinupApp:
                         cells += [(s if n in GRUPOS_MAESTROS[f'{g}_L'] else "", col) for g in grps]
                     else:
                         cells += [(s if n in GRUPOS_MAESTROS[g] else "", col) for g in grps]
+            # Add filter columns
+            if vc.get('filters', True):
+                cells += [
+                    (s if n in GRUPOS_MAESTROS['R'] else "", '#c0392b'),
+                    (s if n in GRUPOS_MAESTROS['B'] else "", '#222222'),
+                    (s if n in GRUPOS_MAESTROS['Even'] else "", '#446644'),
+                    (s if n in GRUPOS_MAESTROS['Odd'] else "", '#664444'),
+                    (s if n in GRUPOS_MAESTROS['1-18'] else "", '#555577'),
+                    (s if n in GRUPOS_MAESTROS['19-36'] else "", '#445566'),
+                ]
             self.reg_rows_box.controls.append(
                 ft.Row(
                     controls=[
@@ -2229,7 +2895,18 @@ class LinupApp:
                 total      = self.val_fout * multi * n  # 1 chip per group × n groups × multi
                 win_payout = self.val_fout * multi * 3  # one winning group pays 3:1
         else:
-            total      = sum(self._group_cost(g) * multi for g in self.grupos_activos)
+            # Inside bets: account for sniper mode
+            if self.sniper_mode:
+                # Sniper ON: use intersection size only (no fallback)
+                intersection = self._compute_intersection()
+                num_chips = len(intersection)
+                total = self.val_fin * num_chips * multi
+            else:
+                # Sniper OFF: use multiplicity-weighted cost
+                safety_levels = self._compute_safety_levels()
+                num_chips_weighted = sum(safety for safety in safety_levels.values())
+                total = self.val_fin * num_chips_weighted * multi
+            
             win_payout = self.val_fin * 36 * multi
 
         return total, win_payout
@@ -2298,7 +2975,7 @@ class LinupApp:
             self.update_ui()                    # single page.update() flushes all
         except Exception as _err:
             import traceback
-            with open(os.path.join(tempfile.gettempdir(), "linup_error.log"), "a") as _f:
+            with open("/tmp/linup_error.log", "a") as _f:
                 _f.write(f"[process_number] {type(_err).__name__}: {_err}\n")
                 traceback.print_exc(file=_f)
 
@@ -2316,17 +2993,21 @@ class LinupApp:
         for g, btn in self.mixer_btns.items():
             base_color = btn.data['color']
             if g in active_display:
+                # Selected: yellow text (#ffdd00) + bright background
                 btn.style = ft.ButtonStyle(
-                    bgcolor=base_color, color='#f1c40f',
+                    bgcolor=base_color, color='#ffdd00',
                     animation_duration=400,
                     overlay_color={ft.ControlState.PRESSED: ft.Colors.with_opacity(0.4, ft.Colors.WHITE)},
                 )
             elif has_sel:
+                # Deselected (others selected): dimmed base color + white text for visibility
+                dimmed_color = ft.Colors.with_opacity(0.5, base_color)
                 btn.style = ft.ButtonStyle(
-                    bgcolor='#2a2a2a', color='#444444',
+                    bgcolor=dimmed_color, color=ft.Colors.WHITE,
                     animation_duration=400,
                 )
             else:
+                # Unselected (no active): full color with white text
                 btn.style = ft.ButtonStyle(
                     bgcolor=base_color, color=ft.Colors.WHITE,
                     animation_duration=400,
@@ -2334,8 +3015,74 @@ class LinupApp:
                 )
             btn.update()
 
+    def _compute_safety_levels(self):
+        """Compute safety level for each number (count of groups that contain it).
+        Returns dict {num: count} where count is 0-5."""
+        levels = {}
+        # Use ALL active groups, not just straight ones
+        active_groups = [g for g in self.grupos_activos
+                        if g in GRUPOS_MAESTROS]  # make sure group exists
+        for num in range(0, 37):
+            count = sum(1 for g in active_groups if num in GRUPOS_MAESTROS[g])
+            levels[num] = count
+        return levels
+
+    def _compute_intersection(self):
+        """Sniper mode: smart intersection across group types, union within types.
+        
+        Examples:
+        - Z0 + ZG (both sectors): UNION of sectors
+        - Z0 + ZG + R (sectors + color): (Z0 ∪ ZG) ∩ R
+        - Z0 + ZG + 1a + Even: (Z0 ∪ ZG) ∩ (1a) ∩ (Even)
+        - 1a + 2a + R: (1a ∪ 2a) ∩ R
+        """
+        active_groups = [g for g in self.grupos_activos
+                        if g in GRUPOS_MAESTROS]
+        if not active_groups:
+            return set()
+        
+        # Categorize groups by type
+        def get_group_type(g):
+            if g in {'Z0', 'ZG', 'ZP', 'H'}:
+                return 'SECTOR'
+            elif g in {'T1', 'T2', 'T3'}:
+                return 'WHEEL'
+            elif g in {'W1', 'W2', 'W3'}:
+                return 'WAVE'
+            elif g.startswith(('34', '35', '36')):
+                return 'COLUMN'
+            elif g.startswith(('1a', '2a', '3a')):
+                return 'DOZEN'
+            else:  # R, B, Even, Odd, 1-18, 19-36
+                return 'FILTER'
+        
+        # Group by type
+        by_type = {}
+        for g in active_groups:
+            gtype = get_group_type(g)
+            if gtype not in by_type:
+                by_type[gtype] = []
+            by_type[gtype].append(g)
+        
+        # Compute union for each type
+        type_unions = {}
+        for gtype, groups in by_type.items():
+            union = set()
+            for g in groups:
+                union |= GRUPOS_MAESTROS[g]
+            type_unions[gtype] = union
+        
+        # Intersect across types
+        result = None
+        for gtype, union_set in type_unions.items():
+            if result is None:
+                result = union_set.copy()
+            else:
+                result &= union_set
+        
+        return result if result is not None else set()
+
     def seleccionar_mixer(self, e):
-        SECTORS = {'Z0', 'ZG', 'ZP', 'H'}
         g = e.control.data['name']
         # In Live Table mode, map dozens/columns to their live/filtered variants
         actual_g = g
@@ -2350,29 +3097,38 @@ class LinupApp:
             self.grupos_activos = [x for x in self.grupos_activos
                                    if self._to_display_name(x) != g]
         else:
-            all_sectors = all(x in SECTORS for x in self.grupos_activos) and g in SECTORS
-            limit = 3 if all_sectors else 2
-            if len(self.grupos_activos) < limit:
-                self.grupos_activos.append(actual_g)
+            # Always allow unlimited selections
+            self.grupos_activos.append(actual_g)
         self._refresh_mixer_colors()
         self.update_inv_label()
         self.lbl_inv.update()
 
     def _show_roulette_chip_popup(self, on_ready_cb):
         """Show vertical roulette chip placement popup for all active straight groups.
-        Calls on_ready_cb() when the user dismisses with READY."""
+        Calls on_ready_cb() when the user dismisses with READY.
+        If sniper_mode: show only intersection of all groups
+        If not sniper_mode: show safety levels (1-5 based on group count per number)"""
         multi        = self._current_multi(is_out=False)
         chip_per_num = self.val_fin * multi
+
+        # Sniper mode: show intersection only (no fallback)
+        if self.sniper_mode:
+            intersection = self._compute_intersection()
+            all_nums = intersection  # Show only intersection, never fallback to union
+            safety_levels = {n: 1 for n in all_nums}  # all shown numbers have same "safety"
+            min_safety_filter = 1
+        else:
+            # Show all possible numbers from all active groups with multiplicity
+            all_nums: set = set()
+            for g in self.grupos_activos:
+                if g in GRUPOS_MAESTROS:
+                    all_nums |= GRUPOS_MAESTROS[g]
+            safety_levels = self._compute_safety_levels()
+            min_safety_filter = 0  # Show all numbers, no filtering
+            # Calculate max safety level for highlighting with yellow in sniper OFF mode
+            max_safety = max(safety_levels.values()) if safety_levels else 0
+
         total_cost, _ = self._compute_bet()   # exact amount that will hit the bank
-
-        # Merge all nums from active straight groups (including live inside groups)
-        straight_groups = [g for g in self.grupos_activos
-                           if g in self.GRUPOS_STRAIGHT or g in GRUPOS_LIVE_INSIDE]
-        all_nums: set = set()
-        for g in straight_groups:
-            all_nums |= GRUPOS_MAESTROS[g]
-
-        # Color: use first group's color, or blended label if two
         def grp_color(g):
             if g in {'Z0', 'ZG', 'ZP', 'H'}:                   return C_SEC
             if g in {'W1', 'W2', 'W3'}:                         return C_WAV
@@ -2397,46 +3153,120 @@ class LinupApp:
                 content=ft.Text(grp_label(g), color=ft.Colors.WHITE, size=14,
                                 weight=ft.FontWeight.BOLD),
             )
-            for g in straight_groups
+            for g in self.grupos_activos
         ]
 
         CELL = 25   # zero cell size
         CN   = 50   # number cell size (double, -10%)
         GAP  = 2
 
+        # Multiplicity colors for border: 1x=red, 2x=orange, 3x=cyan, 4x=blue; max level always yellow
+        SAFETY_COLORS = {
+            1: '#c0392b',    # deep red - lowest multiplicity
+            2: '#e67e22',    # orange
+            3: '#1abc9c',    # cyan/turquoise - distinctive
+            4: '#3498db',    # bright blue
+            5: '#3498db',    # bright blue (max is yellow, so this is fallback)
+        }
+        
         def num_bg(num):
-            return '#27ae60' if num == 0 else ('#c0392b' if num in ROJOS else '#2c3e50')
+            """Original roulette colors: red for ROJOS, black for others, green for zero"""
+            if num == 0:
+                return '#27ae60'
+            else:
+                return '#c0392b' if num in ROJOS else '#2c3e50'
+        
+        def get_border_color(num, safety):
+            """Border color based on safety level or sniper mode"""
+            if self.sniper_mode:
+                # In sniper mode: yellow border for intersection, dim gray for non-intersection
+                return '#ffdd00' if (num in all_nums) else '#444'
+            else:
+                # Show safety level color as border; gray if doesn't meet filter
+                if safety >= min_safety_filter:
+                    return SAFETY_COLORS.get(safety, '#888')
+                else:
+                    return '#222'  # very dark for filtered-out numbers
 
         def make_cell(num):
-            lit = num in all_nums
+            # Cell is lit if in intersection (sniper mode) or always when sniper OFF
+            if self.sniper_mode:
+                lit = num in all_nums
+                border_color = '#ffdd00' if lit else '#444'
+            else:
+                # Sniper OFF: show all numbers with multiplicity label
+                lit = True  # always lit in sniper OFF
+                safety = safety_levels.get(num, 0)
+                # Use yellow for the highest multiplicity level, otherwise use SAFETY_COLORS
+                if safety == max_safety and max_safety > 0:
+                    border_color = '#ffdd00'
+                else:
+                    border_color = SAFETY_COLORS.get(safety, '#888')
+            
+            # Add multiplicity label when sniper OFF
+            multiplicity_text = None
+            if not self.sniper_mode:
+                safety = safety_levels.get(num, 0)
+                if safety > 0:
+                    multiplicity_text = f"{safety}x"
+            
+            content_controls = [ft.Text(str(num), size=14, color=ft.Colors.WHITE,
+                                      weight=ft.FontWeight.BOLD,
+                                      text_align=ft.TextAlign.CENTER)]
+            if multiplicity_text:
+                content_controls.append(ft.Text(multiplicity_text, size=10, color=ft.Colors.WHITE,
+                                              weight=ft.FontWeight.BOLD,
+                                              text_align=ft.TextAlign.CENTER))
+            
             return ft.Container(
                 width=CN, height=CN,
                 bgcolor=num_bg(num),
-                border=ft.Border.all(3 if lit else 0.5,
-                                     '#f1c40f' if lit else '#444'),
+                border=ft.Border.all(3 if lit else 0.5, border_color),
                 border_radius=6,
                 content=ft.Column(
                     alignment=ft.MainAxisAlignment.CENTER,
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    controls=[ft.Text(str(num), size=14, color=ft.Colors.WHITE,
-                                      weight=ft.FontWeight.BOLD,
-                                      text_align=ft.TextAlign.CENTER)],
+                    spacing=0,
+                    controls=content_controls,
                 ),
             )
 
 
         ROW_W = CN * 3 + GAP * 2   # exact pixel width of a number row
 
+        # Zero row: green background, border color based on mode
+        if self.sniper_mode:
+            zero_lit = 0 in all_nums
+            zero_border_color = '#ffdd00' if zero_lit else '#444'
+            zero_content = ft.Text("0", size=14, color=ft.Colors.WHITE,
+                                  weight=ft.FontWeight.BOLD,
+                                  text_align=ft.TextAlign.CENTER)
+        else:
+            # Sniper OFF: always lit, show multiplicity
+            zero_lit = True
+            zero_safety = safety_levels.get(0, 0)
+            # Use yellow for the highest multiplicity level, otherwise use SAFETY_COLORS
+            if zero_safety == max_safety and max_safety > 0:
+                zero_border_color = '#ffdd00'
+            else:
+                zero_border_color = SAFETY_COLORS.get(zero_safety, '#888')
+            zero_content = ft.Column(
+                alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=0,
+                controls=[ft.Text("0", size=14, color=ft.Colors.WHITE,
+                                 weight=ft.FontWeight.BOLD),
+                         ft.Text(f"{zero_safety}x", size=10, color=ft.Colors.WHITE,
+                                weight=ft.FontWeight.BOLD) if zero_safety > 0 else ft.Container(height=0)]
+            )
+        
         zero_row = ft.Container(
             width=ROW_W, height=CELL * 2,
             bgcolor='#27ae60',
-            border=ft.Border.all(3 if 0 in all_nums else 0.5,
-                                 '#f1c40f' if 0 in all_nums else '#444'),
+            border=ft.Border.all(3 if zero_lit else 0.5, zero_border_color),
             border_radius=6,
             alignment=ft.Alignment(0, 0),
-            content=ft.Text("0", size=14, color=ft.Colors.WHITE,
-                            weight=ft.FontWeight.BOLD,
-                            text_align=ft.TextAlign.CENTER),
+            content=zero_content,
         )
 
         num_rows = []
@@ -2837,7 +3667,7 @@ class LinupApp:
             pl -= pending_cost
             displayed_bank -= pending_cost
         pl_pct = (pl / self.banca_inicial * 100) if self.banca_inicial != 0 else 0
-        self.lbl_bank.value = f"{self.nombre_mesa}  |  ${displayed_bank:.2f}"
+        self.lbl_bank.value = f"{self.nombre_mesa}  |  {self._fmt_bank(displayed_bank)}"
         self.lbl_pl.value   = f"P/L: {pl_pct:+.1f}%"
         self.lbl_pl.color   = '#2ecc71' if pl >= 0 else '#ff4444'
         self.update_inv_label()
