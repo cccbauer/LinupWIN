@@ -154,15 +154,14 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     def _col_width(self):
         w  = self.page.width or 360
-        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave','filters']})
+        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave']})
         n  = (1
               + (6 if vc.get('basic',  True) else 0)
               + (3 if vc.get('cols',   True) else 0)
               + (3 if vc.get('docs',   True) else 0)
               + (4 if vc.get('secs',   True) else 0)
               + (3 if vc.get('thirds', True) else 0)
-              + (3 if vc.get('wave',   True) else 0)
-              + (4 if vc.get('filters', True) else 0))
+              + (3 if vc.get('wave',   True) else 0))
         return max(11, int((w - 4) / max(n, 1)))
 
     def _on_resize(self, e):
@@ -2110,9 +2109,6 @@ class LinupApp:
                                      value=vc['wave'],
                                      fill_color=C_WAV, check_color=ft.Colors.WHITE,
                                      label_style=ft.TextStyle(color=ft.Colors.WHITE, size=13))
-        self.cb_filters = ft.Checkbox(label="Filters  (R B Even Odd 1-18 19-36)", value=vc.get('filters', True),
-                                      fill_color='#FF6B00', check_color=ft.Colors.WHITE,
-                                      label_style=ft.TextStyle(color=ft.Colors.WHITE, size=13))
 
         btn_txt = "RESUME TABLE" if is_continue else "OPEN TABLE"
         self._set_view(
@@ -2150,7 +2146,6 @@ class LinupApp:
                         self.cb_secs,
                         self.cb_thirds,
                         self.cb_wave,
-                        self.cb_filters,
                         ft.Container(height=6),
                         ft.ElevatedButton(
                             btn_txt, on_click=self.iniciar_ciclo,
@@ -2184,7 +2179,6 @@ class LinupApp:
                 'secs':   bool(self.cb_secs.value),
                 'thirds': bool(self.cb_thirds.value),
                 'wave':   bool(self.cb_wave.value),
-                'filters': bool(self.cb_filters.value),
             }
         except Exception:
             pass
@@ -2747,7 +2741,7 @@ class LinupApp:
     # ──────────────────────────────────────────────────────────────────
     def _table_specs(self):
         """Return list of (header, color) pairs based on visible_cats."""
-        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave','filters']})
+        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave']})
         W  = ft.Colors.WHITE
         specs = [("N", '#f1c40f')]
         if vc.get('basic',  True): specs += [("R",'#ff4d4d'),("N",W),("P",'#3498db'),("I",'#f39c12'),("B",W),("A",W)]
@@ -2774,7 +2768,7 @@ class LinupApp:
         cw = self._col_width()
         self._rebuild_table_header()
         self.reg_rows_box.controls.clear()
-        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave','filters']})
+        vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave']})
         s  = "■"
         W  = ft.Colors.WHITE
         for n in self.history_nums[-9:]:
