@@ -2750,7 +2750,6 @@ class LinupApp:
         vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave','filters']})
         W  = ft.Colors.WHITE
         specs = [("N", '#f1c40f')]
-        if vc.get('basic',  True): specs += [("R",'#ff4d4d'),("N",W),("P",'#3498db'),("I",'#f39c12'),("B",W),("A",W)]
         if vc.get('cols',   True): specs += [("34",C_COL),("35",C_COL),("36",C_COL)]
         if vc.get('docs',   True): specs += [("1a",C_DOC),("2a",C_DOC),("3a",C_DOC)]
         if vc.get('secs',   True): specs += [("Z0",C_SEC),("ZG",C_SEC),("ZP",C_SEC),("H",C_SEC)]
@@ -2780,15 +2779,6 @@ class LinupApp:
         W  = ft.Colors.WHITE
         for n in self.history_nums[-9:]:
             cells = [(str(n), '#f1c40f')]
-            if vc.get('basic', True):
-                cells += [
-                    (s if n in ROJOS else "",                '#ff4d4d'),
-                    (s if (n != 0 and n not in ROJOS) else "", W),
-                    (s if (n != 0 and n % 2 == 0) else "",  '#3498db'),
-                    (s if (n % 2 != 0) else "",              '#f39c12'),
-                    (s if (1 <= n <= 18) else "",            W),
-                    (s if (19 <= n <= 36) else "",           W),
-                ]
             live = getattr(self, 'live_table_mode', False)
             for key, grps, col in [
                 ('cols',   ['34','35','36'],       C_COL),
