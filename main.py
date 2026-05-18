@@ -3641,7 +3641,12 @@ class LinupApp:
                 num_chips = multi * n_grp   # per-group × number of groups
             else:
                 chip_val  = self.val_fin
-                num_chips = sum(len(GRUPOS_MAESTROS[g]) for g in self.grupos_activos) * multi
+                # Sniper mode: use intersection size; regular mode: use multiplicity-weighted sum
+                if self.sniper_mode:
+                    intersection = self._compute_intersection()
+                    num_chips = len(intersection) * multi
+                else:
+                    num_chips = sum(len(GRUPOS_MAESTROS[g]) for g in self.grupos_activos) * multi
             prog_tag = "" if self.prog_on else f" [{multi}x]"
             self.lbl_inv.value = f"BET: ${total:.2f} ({num_chips}x${chip_val:.4g}){prog_tag}"
         else:
