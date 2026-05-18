@@ -2911,7 +2911,15 @@ class LinupApp:
                 total_cost, win_py    = self._compute_bet()
                 self.banca_actual    -= total_cost
 
-                if any(num in GRUPOS_MAESTROS[g] for g in self.grupos_activos):
+                # Sniper mode: check intersection only; regular mode: check if in any group
+                is_win = False
+                if self.sniper_mode and not is_out:
+                    intersection = self._compute_intersection()
+                    is_win = num in intersection
+                else:
+                    is_win = any(num in GRUPOS_MAESTROS[g] for g in self.grupos_activos)
+
+                if is_win:
                     self.banca_actual += win_py
                     self.last_bank_delta = win_py - total_cost
                     # Only reset progression counters when progression is active
