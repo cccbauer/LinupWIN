@@ -2880,10 +2880,16 @@ class LinupApp:
         else:
             # Inside bets: account for sniper mode
             if self.sniper_mode:
-                # Sniper ON: use intersection size only (no fallback)
+                # Sniper ON: try intersection, fall back to safety levels if empty
                 intersection = self._compute_intersection()
-                num_chips = len(intersection)
-                total = self.val_fin * num_chips * multi
+                if intersection:
+                    num_chips = len(intersection)
+                    total = self.val_fin * num_chips * multi
+                else:
+                    # Intersection is empty (non-overlapping groups) → use multiplicity
+                    safety_levels = self._compute_safety_levels()
+                    num_chips_weighted = sum(safety for safety in safety_levels.values())
+                    total = self.val_fin * num_chips_weighted * multi
             else:
                 # Sniper OFF: use multiplicity-weighted cost
                 safety_levels = self._compute_safety_levels()
@@ -3459,10 +3465,8 @@ class LinupApp:
     def confirmar_manual(self, e=None):
         if not self.grupos_activos:
             return
-        if self._has_straight():
-            self._show_roulette_chip_popup(self._proceed_bet)
-        else:
-            self._proceed_bet()
+        # Show chip placement popup for all bets (straight groups, inside bets, etc.)
+        self._show_roulette_chip_popup(self._proceed_bet)
 
     def auto_invertir_sug(self, grupos):
         self.limpiar_seleccion_visual()
