@@ -2750,12 +2750,12 @@ class LinupApp:
         vc = getattr(self, 'visible_cats', {k: True for k in ['basic','cols','docs','secs','thirds','wave','filters']})
         W  = ft.Colors.WHITE
         specs = [("N", '#f1c40f')]
+        if vc.get('basic',  True): specs += [("R",'#ff4d4d'),("N",W),("P",'#3498db'),("I",'#f39c12'),("B",W),("A",W)]
         if vc.get('cols',   True): specs += [("34",C_COL),("35",C_COL),("36",C_COL)]
         if vc.get('docs',   True): specs += [("1a",C_DOC),("2a",C_DOC),("3a",C_DOC)]
         if vc.get('secs',   True): specs += [("Z0",C_SEC),("ZG",C_SEC),("ZP",C_SEC),("H",C_SEC)]
         if vc.get('thirds', True): specs += [("T1",C_SET),("T2",C_SET),("T3",C_SET)]
         if vc.get('wave',   True): specs += [("W1",C_WAV),("W2",C_WAV),("W3",C_WAV)]
-        if vc.get('filters', True): specs += [("R",'#c0392b'),("B",'#222222'),("E",'#446644'),("O",'#664444'),("18",'#555577'),("36",'#445566')]
         return specs
 
     def _rebuild_table_header(self):
@@ -2779,6 +2779,15 @@ class LinupApp:
         W  = ft.Colors.WHITE
         for n in self.history_nums[-9:]:
             cells = [(str(n), '#f1c40f')]
+            if vc.get('basic', True):
+                cells += [
+                    (s if n in ROJOS else "",                '#ff4d4d'),
+                    (s if (n != 0 and n not in ROJOS) else "", W),
+                    (s if (n != 0 and n % 2 == 0) else "",  '#3498db'),
+                    (s if (n % 2 != 0) else "",              '#f39c12'),
+                    (s if (1 <= n <= 18) else "",            W),
+                    (s if (19 <= n <= 36) else "",           W),
+                ]
             live = getattr(self, 'live_table_mode', False)
             for key, grps, col in [
                 ('cols',   ['34','35','36'],       C_COL),
@@ -2793,16 +2802,6 @@ class LinupApp:
                         cells += [(s if n in GRUPOS_MAESTROS[f'{g}_L'] else "", col) for g in grps]
                     else:
                         cells += [(s if n in GRUPOS_MAESTROS[g] else "", col) for g in grps]
-            # Add filter columns
-            if vc.get('filters', True):
-                cells += [
-                    (s if n in GRUPOS_MAESTROS['R'] else "", '#c0392b'),
-                    (s if n in GRUPOS_MAESTROS['B'] else "", '#222222'),
-                    (s if n in GRUPOS_MAESTROS['Even'] else "", '#446644'),
-                    (s if n in GRUPOS_MAESTROS['Odd'] else "", '#664444'),
-                    (s if n in GRUPOS_MAESTROS['1-18'] else "", '#555577'),
-                    (s if n in GRUPOS_MAESTROS['19-36'] else "", '#445566'),
-                ]
             self.reg_rows_box.controls.append(
                 ft.Row(
                     controls=[
