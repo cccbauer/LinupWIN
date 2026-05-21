@@ -110,7 +110,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v17.0.0"
+        self.page.title      = "Linup v17.1.0"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -516,7 +516,7 @@ class LinupApp:
                         ft.Text("Linup", color='#3498db', size=64,
                                 weight=ft.FontWeight.BOLD),
                         ft.Container(height=8),
-                        ft.Text("v17.0.0", color='#7f8c8d', size=18),
+                        ft.Text("v17.1.0", color='#7f8c8d', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -2868,36 +2868,79 @@ class LinupApp:
         if n == 0:
             return 0.0, 0.0
 
-        is_out = self._is_outside()
-        multi  = self._current_multi(is_out)   # always per-group
-        if is_out:
-            if n == 1:
-                total      = self.val_fout * multi
+        # Define outside bet types
+        columns = {'34', '35', '36'}
+        dozens = {'1a', '2a', '3a'}
+        filters = {'R', 'B', 'Even', 'Odd', '1-18', '19-36'}
+        outside_types = columns | dozens | filters
+        
+        # Categorize active groups
+        col_groups = [g for g in self.grupos_activos if g in columns]
+        doc_groups = [g for g in self.grupos_activos if g in dozens]
+        flt_groups = [g for g in self.grupos_activos if g in filters]
+        other_groups = [g for g in self.grupos_activos if g not in outside_types]
+        
+        # Count how many types are represented
+        types_used = sum([1 for x in [col_groups, doc_groups, flt_groups, other_groups] if x])
+        
+        total = 0.0
+        win_payout = 0.0
+        
+        # If only ONE type is used, it's an outside bet
+        if types_used <= 1:
+            is_out = True
+            multi_out = self._current_multi(is_out)
+            n_out = len(self.grupos_activos)
+            if n_out == 1:
+                total = self.val_fout * multi_out
                 win_payout = total * 3
             else:
-                total      = self.val_fout * multi * n  # 1 chip per group × n groups × multi
-                win_payout = self.val_fout * multi * 3  # one winning group pays 3:1
+                total = self.val_fout * multi_out * n_out
+                win_payout = self.val_fout * multi_out * 3
         else:
-            # Inside bets: account for sniper mode
-            if self.sniper_mode:
-                # Sniper ON: try intersection, fall back to safety levels if empty
-                intersection = self._compute_intersection()
-                if intersection:
-                    num_chips = len(intersection)
-                    total = self.val_fin * num_chips * multi
-                else:
-                    # Intersection is empty (non-overlapping groups) → use multiplicity
-                    safety_levels = self._compute_safety_levels()
-                    num_chips_weighted = sum(safety for safety in safety_levels.values())
-                    total = self.val_fin * num_chips_weighted * multi
-            else:
-                # Sniper OFF: use multiplicity-weighted cost
-                safety_levels = self._compute_safety_levels()
-                num_chips_weighted = sum(safety for safety in safety_levels.values())
-                total = self.val_fin * num_chips_weighted * multi
+            # Mixed types = inside bet with intersection
+            multi_in = self._current_multi(is_out=False)
             
-            win_payout = self.val_fin * 36 * multi
-
+            # Calculate all numbers covered by each type
+            type_nums = []
+            
+            if col_groups:
+                col_nums = set()
+                for g in col_groups:
+                    col_nums |= GRUPOS_MAESTROS[g]
+                type_nums.append(col_nums)
+            
+            if doc_groups:
+                doc_nums = set()
+                for g in doc_groups:
+                    doc_nums |= GRUPOS_MAESTROS[g]
+                type_nums.append(doc_nums)
+            
+            if flt_groups:
+                flt_nums = set()
+                for g in flt_groups:
+                    flt_nums |= GRUPOS_MAESTROS[g]
+                type_nums.append(flt_nums)
+            
+            if other_groups:
+                oth_nums = set()
+                for g in other_groups:
+                    if g in GRUPOS_MAESTROS:
+                        oth_nums |= GRUPOS_MAESTROS[g]
+                type_nums.append(oth_nums)
+            
+            # Intersection of all types
+            if type_nums:
+                intersection = type_nums[0]
+                for nums_set in type_nums[1:]:
+                    intersection &= nums_set
+            else:
+                intersection = set()
+            
+            num_chips = len(intersection) if intersection else 1
+            total = self.val_fin * num_chips * multi_in
+            win_payout = self.val_fin * 36 * multi_in
+        
         return total, win_payout
 
     def process_number(self, e):
@@ -3459,23 +3502,45 @@ class LinupApp:
         return any(g in self.GRUPOS_STRAIGHT or g in GRUPOS_LIVE_INSIDE
                    for g in self.grupos_activos)
 
+    def _is_outside_bet_type(self):
+        """Check if current selection is an outside bet type (same category only)."""
+        if not self.grupos_activos:
+            return False
+        
+        columns = {'34', '35', '36'}
+        dozens = {'1a', '2a', '3a'}
+        filters = {'R', 'B', 'Even', 'Odd', '1-18', '19-36'}
+        outside_types = columns | dozens | filters
+        
+        col_groups = [g for g in self.grupos_activos if g in columns]
+        doc_groups = [g for g in self.grupos_activos if g in dozens]
+        flt_groups = [g for g in self.grupos_activos if g in filters]
+        other_groups = [g for g in self.grupos_activos if g not in outside_types]
+        
+        types_used = sum([1 for x in [col_groups, doc_groups, flt_groups, other_groups] if x])
+        return types_used <= 1
+
     def _proceed_bet(self):
         self._check_pre_bet_warning(self._activate_bet)
 
     def confirmar_manual(self, e=None):
         if not self.grupos_activos:
             return
-        # Show chip placement popup for all bets (straight groups, inside bets, etc.)
-        self._show_roulette_chip_popup(self._proceed_bet)
+        # Skip popup for outside bets, show it for inside/straight bets
+        if self._is_outside_bet_type():
+            self._proceed_bet()
+        else:
+            self._show_roulette_chip_popup(self._proceed_bet)
 
     def auto_invertir_sug(self, grupos):
         self.limpiar_seleccion_visual()
         self.grupos_activos = list(grupos)
         self._refresh_mixer_colors()
-        if self._has_straight():
-            self._show_roulette_chip_popup(self._proceed_bet)
-        else:
+        # Skip popup for outside bets
+        if self._is_outside_bet_type():
             self._proceed_bet()
+        else:
+            self._show_roulette_chip_popup(self._proceed_bet)
 
     # ──────────────────────────────────────────────────────────────────
     # SUGGESTIONS

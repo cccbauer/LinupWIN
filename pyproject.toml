@@ -1,6 +1,6 @@
 [project]
 name = "Linup"
-version = "12.0.0"
+version = "17.1.0"
 description = "Linup Roulette Tracker"
 requires-python = ">=3.10"
 dependencies = ["flet>=0.25.0"]
@@ -12,6 +12,5 @@ company = "Linup"
 icon = "icon.png"
 bundle_id = "com.linup.app"
 
-[tool.flet.windows]
-file_version = "12.0.0.0"
-product_version = "12.0.0.0"
+[tool.flet.macos]
+minimum_version = "12.0"
