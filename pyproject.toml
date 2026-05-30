@@ -1,6 +1,6 @@
 [project]
 name = "Linup"
-version = "17.1.0"
+version = "18.1.1"
 description = "Linup Roulette Tracker"
 requires-python = ">=3.10"
 dependencies = ["flet>=0.25.0"]
