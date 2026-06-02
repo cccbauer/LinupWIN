@@ -110,7 +110,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v18.1.2"
+        self.page.title      = "Linup v18.1.3"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -516,7 +516,7 @@ class LinupApp:
                         ft.Text("Linup", color='#3498db', size=64,
                                 weight=ft.FontWeight.BOLD),
                         ft.Container(height=8),
-                        ft.Text("v18.1.2", color='#7f8c8d', size=18),
+                        ft.Text("v18.1.3", color='#7f8c8d', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -1935,7 +1935,7 @@ class LinupApp:
             read_only=True,
         )
         sug_bank     = self.banca_actual
-        sug_max_loss = 33.0    # default: 3 losses = 33% bank
+        sug_max_loss = getattr(self, 'last_max_loss', 33.0)
 
         def _round_up_chip(val):
             if val <= 0:
@@ -2168,6 +2168,7 @@ class LinupApp:
             self.banca_actual  = self.banca_inicial
             self.val_fin       = float(self.fin_input.value)  if self.fin_input.value  else round(self.banca_inicial / 225, 6)
             self.val_fout      = float(self.fout_input.value) if self.fout_input.value else round(self.banca_inicial / 26, 4)
+            self.last_max_loss = float(self.max_loss_input.value) if self.max_loss_input.value else 33.0
         except Exception:
             pass
         # Read column visibility checkboxes
