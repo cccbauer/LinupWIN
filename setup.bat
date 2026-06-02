@@ -9,7 +9,7 @@ echo.
 :: ============================================================
 :: STEP 1 - Check / install Python
 :: ============================================================
-echo [1/6] Checking Python...
+echo [1/5] Checking Python...
 
 :: Flag passed by the self-restart below so we never loop.
 set POST_INSTALL=0
@@ -103,7 +103,7 @@ echo.
 :: ============================================================
 :: STEP 2 - Virtual environment
 :: ============================================================
-echo [2/6] Setting up virtual environment...
+echo [2/5] Setting up virtual environment...
 if exist venv (
     echo NOTE: venv already exists, reusing it.
 ) else (
@@ -120,7 +120,7 @@ echo.
 :: ============================================================
 :: STEP 3 - Activate venv + upgrade pip
 :: ============================================================
-echo [3/6] Activating venv and upgrading pip...
+echo [3/5] Activating venv and upgrading pip...
 call venv\Scripts\activate.bat
 if errorlevel 1 (
     echo ERROR: Could not activate virtual environment.
@@ -138,40 +138,23 @@ echo OK - pip up to date.
 echo.
 
 :: ============================================================
-:: STEP 4 - Install Flet
+:: STEP 4 - Install Flet and reportlab
 :: ============================================================
-echo [4/6] Installing Flet...
-pip install "flet>=0.25.0" --quiet
+echo [4/5] Installing Flet and dependencies...
+pip install "flet>=0.25.0" "reportlab>=4.0.0" --quiet
 if errorlevel 1 (
-    echo ERROR: Failed to install Flet.
+    echo ERROR: Failed to install dependencies.
     echo        Check your internet connection and try again.
     pause
     exit /b 1
 )
 for /f "tokens=2" %%v in ('pip show flet 2^>^&1 ^| findstr Version') do set FLET_VERSION=%%v
-echo OK - Flet !FLET_VERSION! installed.
-echo.
+echo OK - Flet !FLET_VERSION! and reportlab installed.
 
 :: ============================================================
-:: STEP 5 - Flutter (optional, only needed to build .exe)
+:: STEP 5 - Create run.bat + summary
 :: ============================================================
-echo [5/6] Checking Flutter (optional)...
-flutter --version >nul 2>&1
-if errorlevel 1 (
-    echo NOTE: Flutter not found - only needed if you want to build a standalone .exe.
-    echo       Install guide: https://docs.flutter.dev/get-started/install/windows
-    set FLUTTER_OK=0
-) else (
-    for /f "tokens=2" %%v in ('flutter --version 2^>^&1 ^| findstr /i "Flutter"') do set FLUTTER_VERSION=%%v
-    echo OK - Flutter !FLUTTER_VERSION! found.
-    set FLUTTER_OK=1
-)
-echo.
-
-:: ============================================================
-:: STEP 6 - Create run.bat + summary
-:: ============================================================
-echo [6/6] Finishing up...
+echo [5/5] Finishing up...
 (
     echo @echo off
     echo call "%~dp0venv\Scripts\activate.bat"
@@ -196,10 +179,4 @@ echo   - Or open a terminal here and type:
 echo         venv\Scripts\activate
 echo         flet run main.py
 echo.
-if "!FLUTTER_OK!"=="1" (
-    echo TO BUILD A STANDALONE .EXE:
-    echo         flet build windows
-    echo   Output: build\windows\
-    echo.
-)
 pause
