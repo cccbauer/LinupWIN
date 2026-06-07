@@ -113,7 +113,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v18.1.3"
+        self.page.title      = "Linup v18.1.4"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -288,7 +288,6 @@ class LinupApp:
                     "ALTER TABLE investment_tables ADD COLUMN token_balance REAL DEFAULT 0",
                     "ALTER TABLE investment_tables ADD COLUMN token_price REAL DEFAULT 0",
                     "ALTER TABLE investment_tables ADD COLUMN chips_per_token REAL DEFAULT 0",
-                    "ALTER TABLE investment_tables ADD COLUMN max_loss_pct REAL DEFAULT 33.0",
                 ]:
                     try:
                         conn.execute(_col)
@@ -311,57 +310,6 @@ class LinupApp:
             return sqlite3.connect(self.db_path)
         except Exception:
             return None
-
-    def _get_saved_max_loss(self) -> float:
-        """Return persisted max loss for current investment/table, defaulting to 33.0."""
-        inv_id = self.current_investment_id
-        mesa = str(getattr(self, 'nombre_mesa', '') or '').upper()
-        if not inv_id or not mesa:
-            return float(getattr(self, 'last_max_loss', 33.0) or 33.0)
-
-        conn = self._get_conn()
-        if not conn:
-            return float(getattr(self, 'last_max_loss', 33.0) or 33.0)
-        try:
-            row = conn.execute(
-                "SELECT max_loss_pct FROM investment_tables "
-                "WHERE investment_id=? AND UPPER(mesa_name)=UPPER(?) "
-                "ORDER BY id LIMIT 1",
-                (inv_id, mesa)
-            ).fetchone()
-            if row and row[0] is not None:
-                return float(row[0])
-        except Exception:
-            pass
-        finally:
-            conn.close()
-        return float(getattr(self, 'last_max_loss', 33.0) or 33.0)
-
-    def _save_max_loss(self, max_loss_pct: float):
-        """Persist max loss for current investment/table."""
-        inv_id = self.current_investment_id
-        mesa = str(getattr(self, 'nombre_mesa', '') or '').upper()
-        if not inv_id or not mesa:
-            return
-
-        conn = self._get_conn()
-        if not conn:
-            return
-        try:
-            conn.execute(
-                "UPDATE investment_tables SET max_loss_pct=? "
-                "WHERE id=("
-                "SELECT id FROM investment_tables "
-                "WHERE investment_id=? AND UPPER(mesa_name)=UPPER(?) "
-                "ORDER BY id LIMIT 1"
-                ")",
-                (round(float(max_loss_pct), 4), inv_id, mesa)
-            )
-            conn.commit()
-        except Exception:
-            pass
-        finally:
-            conn.close()
 
     def _guardar_sesion(self):
         """Save or update session. Returns (True, None) or (False, error_msg)."""
@@ -634,7 +582,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v18.1.3", color='#7f8c8d', size=18),
+                        ft.Text("v18.1.4", color='#7f8c8d', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -3067,8 +3015,7 @@ class LinupApp:
             read_only=True,
         )
         sug_bank      = self.banca_actual
-        sug_max_loss  = self._get_saved_max_loss()
-        self.last_max_loss = sug_max_loss
+        sug_max_loss  = getattr(self, 'last_max_loss', 33.0)
         sug_base_chip = 0.1    # default base chip for progression
         capital       = getattr(self, 'inv_capital', 0.0)
 
@@ -3148,41 +3095,113 @@ class LinupApp:
             except Exception:
                 pass
 
-        def _chips_from_progression(base_chip):
-            """Calculate CHIP IN total from base chip with fixed progression (1, 2, 3)."""
-            b = _f(base_chip)
-            # 15 chips at each level with 1x, 2x, 3x
-            return b * 15 * 1 + b * 15 * 2 + b * 15 * 3
+        _busy = [False]   # reentrancy guard for cross-field sync
 
+        def _snap_to_base(val, base):
+            """Largest multiple of base <= val, but at least one base chip."""
+            if base <= 0:
+                return max(val, 0.0)
+            n = math.floor(round(val / base, 8))
+            return max(n, 1) * base
+
+        def _fmt(v):
+            v = round(float(v), 4)
+            return str(int(v)) if v == int(v) else f"{v:g}"
+
+        def _fmt_pct(v):
+            v = round(float(v), 2)
+            return str(int(v)) if v == int(v) else f"{v:g}"
+
+        # The four fields share one MAX-LOSS budget: B = bank * maxloss/100.
+        # CHIP IN total = chip × 90, CHIP OUT total = chip × 18 — each equal to B.
+        # Editing any field re-derives the others; chips stay multiples of the
+        # base chip and are floored so the budget never exceeds MAX LOSS.
         def _recalc_fin(e=None):
-            """Derive chip denomination from max_loss budget, floored to base_chip."""
+            """Bank / Base Chip / Max Loss changed → re-derive both chips from budget."""
+            if _busy[0]:
+                return
+            _busy[0] = True
             try:
                 bk   = _f(self.banca_input.value)
                 base = _f(self.fin_base_input.value)
                 ml   = _f(self.max_loss_input.value)
-
                 budget = bk * max(ml, 0) / 100
-
-                # CHIP IN: 90 total chips (15×1 + 15×2 + 15×3)
-                ideal_fin  = budget / 90 if bk > 0 else base
-                chip_denom = _round_up_chip(ideal_fin)
-                if base > 0:
-                    chip_denom = max(chip_denom, base)
-
-                # CHIP OUT: 18 total chips (2×1 + 2×3 + 2×5), snapped to base chip multiple
-                ideal_fout = budget / 18 if bk > 0 else base
-                fout_val   = _round_up_chip(ideal_fout)
-                if base > 0:
-                    fout_val = max(math.floor(round(fout_val / base, 8)) * base, base)
-
-                self.fin_input.value  = str(chip_denom)
-                self.fout_input.value = str(fout_val)
+                if bk > 0 and budget > 0:
+                    cin  = _snap_to_base(budget / 90, base)   # CHIP IN: 90 chips
+                    cout = _snap_to_base(budget / 18, base)   # CHIP OUT: 18 chips
+                else:
+                    cin = cout = max(base, 0.0)
+                self.fin_input.value  = _fmt(cin)
+                self.fout_input.value = _fmt(cout)
                 self.fin_input.update()
                 self.fout_input.update()
-
-                _refresh_labels(bk, chip_denom, fout_val)
+                _refresh_labels(bk, cin, cout)
             except Exception:
                 pass
+            finally:
+                _busy[0] = False
+
+        def _sync_from_chip(chip_val, chips_per_total):
+            """A chip was edited → back-solve the shared budget, push the implied
+            MAX LOSS %, and return the re-derived chips. chips_per_total is
+            90 (CHIP IN) or 18 (CHIP OUT)."""
+            bk   = _f(self.banca_input.value)
+            base = _f(self.fin_base_input.value)
+            budget = max(chip_val, 0.0) * chips_per_total
+            ml   = (budget / bk * 100) if bk > 0 else 0.0
+            cin  = _snap_to_base(budget / 90, base) if budget > 0 else max(base, 0.0)
+            cout = _snap_to_base(budget / 18, base) if budget > 0 else max(base, 0.0)
+            self.max_loss_input.value = _fmt_pct(ml)
+            self.max_loss_input.update()
+            return bk, cin, cout
+
+        def _on_chip_in_change(e=None):
+            """CHIP IN typed → live-update MAX LOSS + CHIP OUT (leave CHIP IN as typed)."""
+            if _busy[0]:
+                return
+            _busy[0] = True
+            try:
+                bk, _cin, cout = _sync_from_chip(_f(self.fin_input.value), 90)
+                self.fout_input.value = _fmt(cout)
+                self.fout_input.update()
+                _refresh_labels(bk, _f(self.fin_input.value), cout)
+            except Exception:
+                pass
+            finally:
+                _busy[0] = False
+
+        def _on_chip_out_change(e=None):
+            """CHIP OUT typed → live-update MAX LOSS + CHIP IN (leave CHIP OUT as typed)."""
+            if _busy[0]:
+                return
+            _busy[0] = True
+            try:
+                bk, cin, _cout = _sync_from_chip(_f(self.fout_input.value), 18)
+                self.fin_input.value = _fmt(cin)
+                self.fin_input.update()
+                _refresh_labels(bk, cin, _f(self.fout_input.value))
+            except Exception:
+                pass
+            finally:
+                _busy[0] = False
+
+        def _on_chip_in_blur(e=None):
+            """Snap CHIP IN to a base-chip multiple on blur, then re-sync."""
+            if _busy[0]:
+                return
+            base = _f(self.fin_base_input.value)
+            self.fin_input.value = _fmt(_snap_to_base(_f(self.fin_input.value), base))
+            self.fin_input.update()
+            _on_chip_in_change()
+
+        def _on_chip_out_blur(e=None):
+            """Snap CHIP OUT to a base-chip multiple on blur, then re-sync."""
+            if _busy[0]:
+                return
+            base = _f(self.fin_base_input.value)
+            self.fout_input.value = _fmt(_snap_to_base(_f(self.fout_input.value), base))
+            self.fout_input.update()
+            _on_chip_out_change()
 
         def _on_bank_change(e):
             try:
@@ -3217,17 +3236,15 @@ class LinupApp:
             value=str(_sug_chip_denom),
             bgcolor='#82e0aa', color=ft.Colors.BLACK, height=45,
             keyboard_type=ft.KeyboardType.NUMBER,
-            read_only=True,
+            on_change=_on_chip_in_change,
+            on_blur=_on_chip_in_blur,
         )
         self.fout_input = ft.TextField(
             value=str(sug_fout),
             bgcolor='#f7dc6f', color=ft.Colors.BLACK, height=45,
             keyboard_type=ft.KeyboardType.NUMBER,
-            on_change=lambda _e: _refresh_labels(
-                _f(self.banca_input.value),
-                _f(self.fin_base_input.value),
-                _f(self.fout_input.value),
-            ),
+            on_change=_on_chip_out_change,
+            on_blur=_on_chip_out_blur,
         )
         self.banca_input = ft.TextField(
             value=str(sug_bank),
@@ -3380,7 +3397,6 @@ class LinupApp:
             self.val_fin       = float(self.fin_input.value)  if self.fin_input.value  else 0.5
             self.val_fout      = float(self.fout_input.value) if self.fout_input.value else 0.5
             self.last_max_loss = float(self.max_loss_input.value) if self.max_loss_input.value else 33.0
-            self._save_max_loss(self.last_max_loss)
         except Exception:
             pass
         # Read column visibility checkboxes
