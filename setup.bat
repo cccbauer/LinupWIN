@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ============================================================
-echo   LINUP v13.0  -  Windows Setup
+echo   LINUP v18.1.4  -  Windows Setup
 echo ============================================================
 echo.
 
@@ -165,7 +165,7 @@ echo Created / updated run.bat
 echo.
 
 echo ============================================================
-echo   LINUP v13.0 - Setup complete!
+echo   LINUP v18.1.4 - Setup complete!
 echo ============================================================
 for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYTHON_VERSION=%%v
 echo   Python : !PYTHON_VERSION!
