@@ -141,7 +141,7 @@ echo.
 :: STEP 4 - Install Flet and reportlab
 :: ============================================================
 echo [4/5] Installing Flet and dependencies...
-pip install "flet>=0.25.0" "reportlab>=4.0.0" --quiet
+pip install "flet==0.80.5" "reportlab>=4.0.0" --quiet
 if errorlevel 1 (
     echo ERROR: Failed to install dependencies.
     echo        Check your internet connection and try again.
