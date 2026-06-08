@@ -113,7 +113,7 @@ class LinupApp:
         self.current_investment_id = None
         self.lbl_inv_pl = None
 
-        self.page.title      = "Linup v18.1.4"
+        self.page.title      = "Linup v18.1.5"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor    = '#1a1a1a'
         self.page.padding    = 0
@@ -582,7 +582,7 @@ class LinupApp:
                         ft.Container(height=16),
                         ft.Image(src="roulette.gif", width=200, height=200),
                         ft.Container(height=16),
-                        ft.Text("v18.1.4", color='#7f8c8d', size=18),
+                        ft.Text("v18.1.5", color='#7f8c8d', size=18),
                         ft.Container(height=48),
                         ft.ProgressRing(color='#3498db', width=36, height=36,
                                         stroke_width=3),
@@ -3015,8 +3015,8 @@ class LinupApp:
             read_only=True,
         )
         sug_bank      = self.banca_actual
-        sug_max_loss  = getattr(self, 'last_max_loss', 33.0)
-        sug_base_chip = 0.1    # default base chip for progression
+        sug_max_loss  = getattr(self, 'last_max_loss', 2.0)
+        sug_base_chip = getattr(self, 'last_base_chip', 0.1)  # remembered base chip from last setup
         capital       = getattr(self, 'inv_capital', 0.0)
 
         def _round_up_chip(val):
@@ -3396,7 +3396,8 @@ class LinupApp:
             # CHIP IN is calculated from progression
             self.val_fin       = float(self.fin_input.value)  if self.fin_input.value  else 0.5
             self.val_fout      = float(self.fout_input.value) if self.fout_input.value else 0.5
-            self.last_max_loss = float(self.max_loss_input.value) if self.max_loss_input.value else 33.0
+            self.last_max_loss = float(self.max_loss_input.value) if self.max_loss_input.value else 2.0
+            self.last_base_chip = float(self.fin_base_input.value) if self.fin_base_input.value else 0.1
         except Exception:
             pass
         # Read column visibility checkboxes
@@ -5207,14 +5208,16 @@ class LinupApp:
         self.update_ui()   # immediately reflect pending bet in P/L
 
     def _check_pre_bet_warning(self, on_confirm):
-        """Show warning if losing this bet would breach 45% stop loss."""
+        """Show warning if losing this bet would breach the configured MAX LOSS."""
         if self.stop_loss_triggered or self.banca_inicial <= 0:
             on_confirm()
             return
+        # MAX LOSS is dynamic — driven by the value the user set in setup.
+        max_loss_frac = getattr(self, 'last_max_loss', 2.0) / 100
         total_cost, _, _ = self._compute_bet()
         potential_bank = self.banca_actual - total_cost
         loss_pct = (self.banca_inicial - potential_bank) / self.banca_inicial
-        if loss_pct < 0.3:
+        if loss_pct < max_loss_frac:
             on_confirm()
             return
 
@@ -5243,7 +5246,7 @@ class LinupApp:
                 ft.Container(height=4),
                 ft.Text(f"Bank: ${potential_bank:.2f}", color='#ff4444',
                         size=18, weight=ft.FontWeight.BOLD),
-                ft.Text(f"Loss: {loss_pct*100:.1f}%  (limit 45%)",
+                ft.Text(f"Loss: {loss_pct*100:.1f}%  (MAX LOSS {max_loss_frac*100:.1f}%)",
                         color='#ff4444', size=13),
             ],
         )
